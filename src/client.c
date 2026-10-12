@@ -10,6 +10,7 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include "sbcp.h"
+#include <netdb.h>
 
 #define BUFFER_SIZE 1024
 #define IDLE_TIMEOUT_SEC 10
