@@ -212,8 +212,8 @@ _Screen capture 7: here_
 | I4 | OFFLINE displayed when a member leaves |
 | I5 | duplicate name: NAK shown, client exits |
 | I6 | room full: NAK shown |
-| I7 | two messages arriving in one TCP segment are both shown (5 rounds) |
-| I8 | two members leaving at once: both OFFLINEs shown |
+| I7 | messages arriving together in one TCP segment are all shown: two FWDs (5 rounds), ONLINE + FWD + OFFLINE, a message plus half of the next |
+| I8 | two members leaving at once: both OFFLINEs, arriving in one segment, are shown |
 | I9 | IDLE about 10 s after JOIN while another member keeps talking |
 | I10 | IDLE about 10 s after JOIN in a quiet room |
 | I11 | two lines arriving together on stdin are both sent at once |

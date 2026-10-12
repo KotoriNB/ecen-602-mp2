@@ -2611,52 +2611,77 @@ static void t_i6_room_full(void)
     CHECK(cli_wait(c, T(3000)), "client kept running after the NAK");
 }
 
+// The scripted server writes several messages with one write(), so they reach
+// the client's socket together on every machine, not only when timing allows.
 static void t_i7_coalesced(void)
 {
-    struct srv  *s = srv_start("127.0.0.1", 5);
-    struct peer *a;
+    uint8_t      buf[512];
+    struct peer *conn;
     struct cli  *c;
-    int          i, shown = 0;
+    size_t       n, first;
+    int          i;
 
-    CHECK(s != NULL, "server did not start");
-    a = join_as(s, "alice");
-    c = client_joined(s, "frank");
-    CHECK(a && c, "setup");
+    conn = fake_join(&c, "alice");
+    CHECK(conn != NULL, "client did not connect and JOIN");
+    CHECK(psend(conn, TYPE_ACK, ATTR_CLIENT_COUNT, "\x00\x02", 2, ATTR_USERNAME, "bob", -1, 0) == 0 &&
+          cli_expect(c, "Client count", T(2000)), "ACK not shown");
     for (i = 0; i < 5; i++) {
-        uint8_t buf[256];
-        char    one[32], two[32];
-        size_t  n;
+        char one[32], two[32];
 
         snprintf(one, sizeof(one), "one%d", i);
         snprintf(two, sizeof(two), "two%d", i);
-        n  = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_SEND, ATTR_MESSAGE, one, -1, 0);
-        n += mk(buf + n, sizeof(buf) - n, SBCP_WIRE_NET, TYPE_SEND, ATTR_MESSAGE, two, -1, 0);
-        CHECK(peer_write(a, buf, n) == 0, "send");
-        snprintf(one, sizeof(one), "alice: one%d", i);
-        snprintf(two, sizeof(two), "alice: two%d", i);
-        shown += cli_has(c, two, T(1000));
-        shown += cli_has(c, one, 0);
+        n  = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_FWD, ATTR_MESSAGE, one, -1,
+                ATTR_USERNAME, "bob", -1, 0);
+        n += mk(buf + n, sizeof(buf) - n, SBCP_WIRE_NET, TYPE_FWD, ATTR_MESSAGE, two, -1,
+                ATTR_USERNAME, "bob", -1, 0);
+        CHECK(peer_write(conn, buf, n) == 0, "write");
+        snprintf(one, sizeof(one), "bob: one%d", i);
+        snprintf(two, sizeof(two), "bob: two%d", i);
+        CHECK(cli_expect(c, one, T(2000)) && cli_expect(c, two, T(1000)),
+              "round %d: two FWDs in one segment not both shown", i + 1);
     }
-    CHECK(shown == 10, "%d of 10 messages shown", shown);
+
+    n  = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_ONLINE, ATTR_USERNAME, "carol", -1, 0);
+    n += mk(buf + n, sizeof(buf) - n, SBCP_WIRE_NET, TYPE_FWD, ATTR_MESSAGE, "hi from carol", -1,
+            ATTR_USERNAME, "carol", -1, 0);
+    n += mk(buf + n, sizeof(buf) - n, SBCP_WIRE_NET, TYPE_OFFLINE, ATTR_USERNAME, "carol", -1, 0);
+    CHECK(peer_write(conn, buf, n) == 0, "write");
+    CHECK(cli_expect(c, "<carol> is online", T(2000)) && cli_expect(c, "carol: hi from carol", T(1000)) &&
+          cli_expect(c, "<carol> is offline", T(1000)),
+          "ONLINE, FWD and OFFLINE in one segment not all shown");
+
+    // A whole message plus the first bytes of the next; the rest comes later.
+    first = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_FWD, ATTR_MESSAGE, "whole", -1,
+               ATTR_USERNAME, "bob", -1, 0);
+    n = first + mk(buf + first, sizeof(buf) - first, SBCP_WIRE_NET, TYPE_FWD, ATTR_MESSAGE,
+                   "in two pieces", -1, ATTR_USERNAME, "bob", -1, 0);
+    CHECK(peer_write(conn, buf, first + 6) == 0, "write");
+    msleep(200);
+    CHECK(peer_write(conn, buf + first + 6, n - first - 6) == 0, "write");
+    CHECK(cli_expect(c, "bob: whole", T(2000)) && cli_expect(c, "bob: in two pieces", T(1000)),
+          "a message plus half of the next in one segment: not both shown");
 }
 
+// Two members leaving at the same moment: both OFFLINEs arrive in one segment.
 static void t_i8_two_leave_at_once(void)
 {
-    struct srv  *s = srv_start("127.0.0.1", 5);
-    struct peer *a, *b;
+    uint8_t      buf[128];
+    struct peer *conn;
     struct cli  *c;
-    int          n;
+    size_t       n;
+    int          shown;
 
-    CHECK(s != NULL, "server did not start");
-    a = join_as(s, "alice");
-    b = join_as(s, "bob");
-    c = client_joined(s, "frank");
-    CHECK(a && b && c, "setup");
-    peer_free(a);
-    peer_free(b);
-    n  = cli_has(c, "<bob> is offline", T(2000));
-    n += cli_has(c, "<alice> is offline", T(500));
-    CHECK(n == 2, "%d of 2 OFFLINE notices shown", n);
+    conn = fake_join(&c, "frank");
+    CHECK(conn != NULL, "client did not connect and JOIN");
+    CHECK(psend(conn, TYPE_ACK, ATTR_CLIENT_COUNT, "\x00\x03", 2, ATTR_USERNAME, "alice", -1,
+                ATTR_USERNAME, "bob", -1, 0) == 0 &&
+          cli_expect(c, "Client count: 3", T(2000)), "ACK not shown");
+    n  = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_OFFLINE, ATTR_USERNAME, "alice", -1, 0);
+    n += mk(buf + n, sizeof(buf) - n, SBCP_WIRE_NET, TYPE_OFFLINE, ATTR_USERNAME, "bob", -1, 0);
+    CHECK(peer_write(conn, buf, n) == 0, "write");
+    shown  = cli_has(c, "<alice> is offline", T(2000));
+    shown += cli_has(c, "<bob> is offline", T(500));
+    CHECK(shown == 2, "%d of 2 OFFLINE notices shown", shown);
 }
 
 static void t_i9_idle_while_others_talk(void)
