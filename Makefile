@@ -1,9 +1,10 @@
 # Makefile -- ECEN 602 MP2: SBCP chat server and client
 #
 #   make              build server and client
-#   make test         server test suite (tests/test_sbcp.c, about 25 s)
-#   make test-quick   the same, skipping the slow timing case
-#   make test-client  end-to-end checks of ./client against ./server (needs python3)
+#   make test         all tests: 41 server cases + 34 client cases (about 1.5 minutes)
+#   make test-server  the server cases only (about 25 s)
+#   make test-client  the client cases only (about 75 s)
+#   make test-quick   all tests except the slow timing cases (about 30 s)
 #   make probe        build tests/sbcp_probe (checks another server's byte layout)
 #   make SANITIZE=1   build with AddressSanitizer + UndefinedBehaviorSanitizer
 #   make clean        remove binaries, object files and test logs
@@ -24,7 +25,7 @@ SERVER_OBJ := $(BUILD)/server.o $(LIB_OBJ)
 CLIENT_OBJ := $(BUILD)/client.o
 HEADERS    := include/sbcp.h include/sbcp_codec.h include/net.h include/util.h
 
-.PHONY: all clean test test-quick test-client probe dist
+.PHONY: all clean test test-server test-client test-quick probe dist
 
 all: server client
 
@@ -52,14 +53,17 @@ tests/test_sbcp: tests/test_sbcp.c $(LIB_OBJ) $(HEADERS)
 tests/sbcp_probe: tests/sbcp_probe.c $(LIB_OBJ) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ tests/sbcp_probe.c $(LIB_OBJ) $(LDFLAGS)
 
-test: server tests/test_sbcp
+test: all tests/test_sbcp
 	./tests/test_sbcp
 
-test-quick: server tests/test_sbcp
-	./tests/test_sbcp --quick
+test-server: server tests/test_sbcp
+	./tests/test_sbcp --group UABCDF
 
-test-client: server client
-	python3 tests/client_checks.py ./server ./client
+test-client: all tests/test_sbcp
+	./tests/test_sbcp --group I
+
+test-quick: all tests/test_sbcp
+	./tests/test_sbcp --quick
 
 probe: tests/sbcp_probe
 

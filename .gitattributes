@@ -4,7 +4,6 @@
 
 # Shell scripts must stay LF or /bin/sh will choke on the CR.
 *.sh   text eol=lf
-*.py   text eol=lf
 Makefile text eol=lf
 
 # Screen captures for the test report.

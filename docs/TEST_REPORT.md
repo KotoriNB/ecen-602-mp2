@@ -5,29 +5,31 @@ Test machine: _fill in: OS, kernel (`uname -r`), gcc version_
 
 ## 1. How we tested
 
-1. **Server test suite** (`make test`, source `tests/test_sbcp.c`, 41 cases).
-   It starts the real `./server` and talks to it over real sockets with raw
-   connections that send hand-written bytes: unit tests of the server's codec,
-   the bonus features, byte-exact messages, malformed input, and disconnect and
-   resource-exhaustion cases (RST at every stage, a client that never reads,
-   more connections than `FD_SETSIZE`, running out of descriptors). After every
-   case it checks that the server is still alive and exits with status 0 on
-   SIGTERM. The server is started with SIGPIPE at its default action, so a
-   server that forgot to ignore SIGPIPE would die here exactly as it would for
-   a grader.
-2. **Client checks** (`make test-client`, source `tests/client_checks.py`,
-   34 checks). The real `./client` runs against the real `./server`, with raw
-   sockets as the other chat members, or against a scripted fake server when a
-   check needs exact bytes or malformed input. Each check controls exactly
-   what reaches the client (two messages in one TCP segment, a message one
-   byte at a time, garbage, an unfinished message, a member chatting while the
-   client stays silent) and sees exactly what the client sends. The client is
-   also checked on a pseudo-terminal for its prompt.
-3. **Manual runs with screen captures** for the handout's required cases and
+1. **Automated test suite** (`make test`, source `tests/test_sbcp.c`, written
+   in C, 75 cases). It starts the real `./server` and `./client` and talks to
+   them over real sockets.
+   - **41 server cases** (`make test-server`) use raw connections that send
+     hand-written bytes: unit tests of the server's codec, the bonus features,
+     byte-exact messages, malformed input, and disconnect and
+     resource-exhaustion cases (RST at every stage, a client that never reads,
+     more connections than `FD_SETSIZE`, running out of descriptors). After
+     every case the suite checks that the server is still alive and exits with
+     status 0 on SIGTERM.
+   - **34 client cases** (`make test-client`) run the real client against the
+     real server, with raw sockets as the other chat members, or against a
+     scripted fake server when a case needs exact bytes or malformed input.
+     Each case controls exactly what reaches the client (two messages in one
+     TCP segment, a message one byte at a time, garbage, an unfinished
+     message, a member chatting while the client stays silent) and sees
+     exactly what the client sends. One case runs the client on a
+     pseudo-terminal to check its prompt.
+   Child processes get SIGPIPE and SIGINT back at their defaults, so a program
+   that forgot to ignore SIGPIPE dies here exactly as it would for a grader.
+2. **Manual runs with screen captures** for the handout's required cases and
    each bonus feature (section 2). `./tests/demo.sh <scenario>` opens the
    server and its clients side by side in tmux and types the messages; the
    same steps can be typed by hand in four terminals.
-4. **Interoperability**: `tests/sbcp_probe <host> <port>` joins a server in
+3. **Interoperability**: `tests/sbcp_probe <host> <port>` joins a server in
    both byte layouts and shows which one it answers (section 4).
 
 ## 2. Required test cases and bonus features
@@ -148,13 +150,13 @@ _Screen capture 6: here_
 
 ### Case 7 — the automated tests
 
-`make test` and `make test-client` — capture both summary lines.
+`make test` — capture the summary line.
 
 _Screen capture 7: here_
 
 ## 3. Automated cases
 
-### Server suite (`make test`)
+### Server cases (`make test-server`)
 
 | ID | Case | What it proves |
 |---|---|---|
@@ -200,9 +202,9 @@ _Screen capture 7: here_
 | D15 | SIGTERM and restart | clean exit 0; restart on the same port at once |
 | F1 | server arguments | bad port/max_clients/IP, port in use: exit 1 |
 
-### Client checks (`make test-client`)
+### Client cases (`make test-client`)
 
-| ID | Check |
+| ID | Case |
 |---|---|
 | I1 | first member gets ACK count 1 |
 | I2 | ACK lists the members already present; they get ONLINE |
@@ -241,12 +243,12 @@ _Screen capture 7: here_
 
 Results:
 
-| Environment | Server suite | Client checks |
+| Environment | Server cases | Client cases |
 |---|---|---|
 | _our test machine (fill in)_ | _fill in_ | _fill in_ |
-| Ubuntu 22.04, kernel 6.8, gcc 11.4, IPv6 | 41/41 pass | IPv6 join and relay checked by hand |
-| Ubuntu 24.04 container, gcc 13.3 / clang 18, no IPv6 | 41/41 pass | 33 pass, I13 skipped |
-| same, client built with ASan + UBSan | | 33 pass, no reports |
+| Ubuntu 22.04, kernel 6.8, gcc 11.4, IPv6 | 41/41 pass | 34/34 pass |
+| Ubuntu 24.04 container, gcc 13.3 / clang 18, no IPv6 | 41/41 pass | 33/33 pass, I13 skipped |
+| same, client built with ASan + UBSan | | 33/33 pass, no reports |
 
 ## 4. Interoperability
 
