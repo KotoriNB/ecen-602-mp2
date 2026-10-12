@@ -1,0 +1,12 @@
+# Normalize line endings.  Developed on Windows, graded on a Linux testbed,
+# so everything is stored as LF in the repository.
+* text=auto eol=lf
+
+# Shell scripts must stay LF or /bin/sh will choke on the CR.
+*.sh   text eol=lf
+*.py   text eol=lf
+Makefile text eol=lf
+
+# Screen captures for the test report.
+*.png binary
+*.jpg binary

@@ -1,5 +1,14 @@
+# Build products: no binaries in the submission (Guideline 6).
 *.o
 *.out
+*.dSYM/
+build/
 client
 server
+tests/test_sbcp
+tests/sbcp_probe
+tests/logs/
+*.tar.gz
+core
+core.*
 .DS_Store
