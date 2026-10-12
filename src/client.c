@@ -17,7 +17,7 @@
 #define BUFFER_SIZE 1024
 #define LINE_BUF_SIZE 4096      /* the longest line a terminal passes on in one read */
 #define IDLE_TIMEOUT_SEC 10
-#define RECV_BUF_SIZE 65536     /* any SBCP message fits: Length is 16 bits */
+#define RECV_BUF_SIZE (65535 + 4)  /* any SBCP message fits: 16-bit Length plus the header */
 #define PARTIAL_TIMEOUT_MS 3000 /* an unfinished message is discarded after this */
 
 /* TCP is a byte stream: bytes from the server that do not form a whole message yet */
@@ -45,6 +45,10 @@ static void prompt(void) {
     }
 }
 
+/* Length fields count the bytes after their own 4-byte header, as the course
+ * server does: the message Length covers the attributes, an attribute Length
+ * its payload. */
+
 /* Helper function to pack a JOIN message */
 static int pack_join(const char *username, uint8_t *buf, size_t buf_size) {
     size_t user_len = strlen(username);
@@ -52,8 +56,8 @@ static int pack_join(const char *username, uint8_t *buf, size_t buf_size) {
         return -1;
     }
 
-    uint16_t attr_len = sizeof(struct sbcp_attr) + user_len;
-    uint16_t total_len = sizeof(struct sbcp_header) + attr_len;
+    uint16_t body_len = sizeof(struct sbcp_attr) + user_len;
+    uint16_t total_len = sizeof(struct sbcp_header) + body_len;
 
     if (total_len > buf_size) {
         return -1;
@@ -62,12 +66,12 @@ static int pack_join(const char *username, uint8_t *buf, size_t buf_size) {
     /* 1. Header */
     struct sbcp_header *hdr = (struct sbcp_header *)buf;
     hdr->vrsn_type = htons(MAKE_VRSN_TYPE(SBCP_VERSION, TYPE_JOIN));
-    hdr->length = htons(total_len);
+    hdr->length = htons(body_len);
 
     /* 2. Username Attribute */
     struct sbcp_attr *attr = (struct sbcp_attr *)(buf + sizeof(struct sbcp_header));
     attr->type = htons(ATTR_USERNAME);
-    attr->length = htons(attr_len);
+    attr->length = htons(user_len);
     memcpy(attr->payload, username, user_len);
 
     return (int)total_len;
@@ -79,8 +83,8 @@ static int pack_send(const char *msg_text, size_t text_len, uint8_t *buf, size_t
         return -1;
     }
 
-    uint16_t attr_len = sizeof(struct sbcp_attr) + text_len;
-    uint16_t total_len = sizeof(struct sbcp_header) + attr_len;
+    uint16_t body_len = sizeof(struct sbcp_attr) + text_len;
+    uint16_t total_len = sizeof(struct sbcp_header) + body_len;
 
     if (total_len > buf_size) {
         return -1;
@@ -89,12 +93,12 @@ static int pack_send(const char *msg_text, size_t text_len, uint8_t *buf, size_t
     /* 1. Header */
     struct sbcp_header *hdr = (struct sbcp_header *)buf;
     hdr->vrsn_type = htons(MAKE_VRSN_TYPE(SBCP_VERSION, TYPE_SEND));
-    hdr->length = htons(total_len);
+    hdr->length = htons(body_len);
 
     /* 2. Message Attribute */
     struct sbcp_attr *attr = (struct sbcp_attr *)(buf + sizeof(struct sbcp_header));
     attr->type = htons(ATTR_MESSAGE);
-    attr->length = htons(attr_len);
+    attr->length = htons(text_len);
     memcpy(attr->payload, msg_text, text_len);
 
     return (int)total_len;
@@ -109,7 +113,7 @@ static int pack_idle(uint8_t *buf, size_t buf_size) {
 
     struct sbcp_header *hdr = (struct sbcp_header *)buf;
     hdr->vrsn_type = htons(MAKE_VRSN_TYPE(SBCP_VERSION, TYPE_IDLE));
-    hdr->length = htons(total_len);
+    hdr->length = htons(0);
 
     return (int)total_len;
 }
@@ -172,13 +176,11 @@ static int process_message(const uint8_t *msg, size_t total_len) {
 
         const struct sbcp_attr *attr = (const struct sbcp_attr *)(msg + offset);
         uint16_t attr_type = ntohs(attr->type);
-        uint16_t attr_len = ntohs(attr->length);
+        size_t payload_len = ntohs(attr->length);
 
-        if (attr_len < sizeof(struct sbcp_attr) || offset + attr_len > total_len) {
+        if (offset + sizeof(struct sbcp_attr) + payload_len > total_len) {
             break;
         }
-
-        size_t payload_len = attr_len - sizeof(struct sbcp_attr);
 
         switch (attr_type) {
             case ATTR_REASON:
@@ -228,7 +230,7 @@ static int process_message(const uint8_t *msg, size_t total_len) {
                 break;
         }
 
-        offset += attr_len;
+        offset += sizeof(struct sbcp_attr) + payload_len;
     }
 
     /* Process based on SBCP type; on a terminal, a notice replaces the prompt line */
@@ -300,10 +302,10 @@ static int handle_server_message(int sockfd) {
         struct sbcp_header hdr;
         memcpy(&hdr, recv_buf + offset, sizeof(hdr));
         uint16_t version = GET_VERSION(ntohs(hdr.vrsn_type));
-        uint16_t total_len = ntohs(hdr.length);
+        size_t total_len = sizeof(struct sbcp_header) + ntohs(hdr.length);
 
         /* Not an SBCP header: the next message boundary is lost, so drop what we have */
-        if (version != SBCP_VERSION || total_len < sizeof(struct sbcp_header)) {
+        if (version != SBCP_VERSION) {
             offset = recv_len;
             break;
         }
