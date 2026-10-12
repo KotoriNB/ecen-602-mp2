@@ -240,26 +240,43 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    /*  addrinfo to support IPv4 and IPv6 */
+    struct addrinfo hints, *serv_info, *p;
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", server_port);
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;      /* AF_UNSPEC dual support IPv4 與 IPv6 */
+    hints.ai_socktype = SOCK_STREAM;  /* TCP protocal */
+
+    int status = getaddrinfo(server_ip, port_str, &hints, &serv_info);
+    if (status != 0) {
+        fprintf(stderr, "Error resolving address '%s': %s\n", server_ip, gai_strerror(status));
+        exit(EXIT_FAILURE);
+    }
+
+    int sockfd = -1;
+    /* go through all feedback useful address，until create a success connection */
+    for (p = serv_info; p != NULL; p = p->ai_next) {
+        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sockfd < 0) {
+            continue;
+        }
+
+        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == 0) {
+            /* success to build connection */
+            break;
+        }
+
+        close(sockfd);
+        sockfd = -1;
+    }
+
+    /* release getaddrinfo memory struct */
+    freeaddrinfo(serv_info);
+
     if (sockfd < 0) {
-        perror("Socket creation failed");
-        exit(EXIT_FAILURE);
-    }
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(server_port);
-
-    if (inet_pton(AF_INET, server_ip, &serv_addr.sin_addr) <= 0) {
-        fprintf(stderr, "Error: Invalid IP address: %s\n", server_ip);
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("Connection to server failed");
-        close(sockfd);
+        fprintf(stderr, "Error: Failed to connect to %s:%s\n", server_ip, port_str);
         exit(EXIT_FAILURE);
     }
 
