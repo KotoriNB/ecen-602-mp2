@@ -43,8 +43,9 @@ server() {
 }
 
 # Next pane runs a client; panes are numbered in the order they were made.
+# The client starts after the panes are retiled, so its first lines are not cut off.
 client() {
-    tmux split-window -t "$S" "./client $* $HOLD"
+    tmux split-window -t "$S" "sleep 0.3; ./client $* $HOLD"
     tmux select-layout -t "$S" tiled >/dev/null
     sleep 0.6
 }
@@ -79,7 +80,7 @@ reuse)
       # alice leaves (end of input)
       tmux send-keys -t "$S:0.1" C-d
       sleep 1.5
-      tmux split-window -t "$S" "./client alice 127.0.0.1 $PORT $HOLD"
+      tmux split-window -t "$S" "sleep 0.3; ./client alice 127.0.0.1 $PORT $HOLD"
       tmux select-layout -t "$S" tiled >/dev/null
       sleep 0.8
       say 3 "a new alice, same name" ) &
@@ -113,13 +114,13 @@ crash)
     client alice 127.0.0.1 "$PORT"
     client bob 127.0.0.1 "$PORT"
     # Inner sh records the client's own pid, so kill -9 hits the client itself.
-    tmux split-window -t "$S" "sh -c 'echo \$\$ > /tmp/sbcp-demo-carol.pid; exec ./client carol 127.0.0.1 $PORT' $HOLD"
+    tmux split-window -t "$S" "sleep 0.3; sh -c 'echo \$\$ > /tmp/sbcp-demo-carol.pid; exec ./client carol 127.0.0.1 $PORT' $HOLD"
     tmux select-layout -t "$S" tiled >/dev/null
     sleep 0.6
     ( say 3 "carol is about to be killed"
       kill -9 "$(cat /tmp/sbcp-demo-carol.pid)" 2>/dev/null
       sleep 1
-      tmux split-window -t "$S" "./client carol 127.0.0.1 $PORT $HOLD"
+      tmux split-window -t "$S" "sleep 0.3; ./client carol 127.0.0.1 $PORT $HOLD"
       tmux select-layout -t "$S" tiled >/dev/null
       sleep 0.8
       say 4 "carol is back" ) &
