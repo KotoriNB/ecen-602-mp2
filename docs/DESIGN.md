@@ -22,7 +22,9 @@ Both programs take the protocol numbers (message and attribute types, length
 limits) from one header, `include/sbcp.h`. The client builds and reads
 messages through its packed `struct sbcp_header` / `struct sbcp_attr` with
 `htons()`/`ntohs()`; the server packs and unpacks fields with byte shifts in
-`src/sbcp_codec.c`. Both produce the same network-byte-order bytes.
+`src/sbcp_codec.c`. Both produce the same network-byte-order bytes, with
+Length fields that count the bytes after their own 4-byte header, as the
+course's reference server does.
 
 ### Server
 
@@ -42,7 +44,7 @@ messages through its packed `struct sbcp_header` / `struct sbcp_attr` with
 | `state` | NEW → JOINED, or NEW → REJECTED (see §3) |
 | `name`, `join_seq` | username once joined; join order for the ACK list |
 | `idle` | bonus: sent IDLE and nothing since |
-| `wire` | byte layout the peer speaks; replies use the same one |
+| `wire` | format the peer speaks (byte layout; Length counting the header or not); replies use the same one |
 | `rd` | reassembly buffer (2 KB) for bytes that are not a whole message yet |
 | `out` | output queue: bytes the kernel would not take yet (≤ 1 MiB) |
 | `dead`, `offline_due` | marked for removal; OFFLINE still owed to the room |
@@ -154,7 +156,8 @@ loop:
 | D11 | Addresses | `getaddrinfo(AF_UNSPEC)` in both programs; the server binds every address of `server_ip`, `::` is dual-stack | `inet_pton` + `AF_INET` would be IPv4-only |
 | D12 | Idle clock | time since the last SEND on `CLOCK_MONOTONIC`, one IDLE per idle spell | a fixed 10 s `select()` timeout restarts whenever a message arrives; wall-clock time jumps; repeating IDLE floods the room |
 | D13 | stdin | `read()` into our own line buffer | `fgets()` hides buffered lines from `select()` |
-| D14 | Other layouts | server accepts little-endian bit-field peers, answers in kind | interoperability with other teams; the spec's layout stays the default |
+| D14 | Other formats | server accepts little-endian bit-field peers and Length fields that count the header, answers in kind | interoperability with other teams; the reference server's format stays the default |
+| D15 | Length fields | count the bytes after their own header, as the reference server on ecewkgsw05201 does; a client's format is learnt from its first message (after a whole message come the next header or nothing, inside a longer one come payload bytes) | counting the header, the other reading of the handout: the reference server then waits for 4 bytes that never come and drops the client |
 
 ## 7. Error policy
 

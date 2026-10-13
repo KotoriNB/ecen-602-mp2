@@ -4,8 +4,11 @@
 //
 // Every field is packed and unpacked with byte shifts in network byte order,
 // never by casting a buffer to a struct, so alignment and padding never matter.
-// Both Length fields count their own 4-byte header. Strings are sent without a
-// terminating NUL; a trailing NUL from a peer is tolerated and stripped.
+// Length fields count the bytes after their own 4-byte header, as the course's
+// reference server does: message Length = all attributes, attribute Length =
+// its payload. Peers whose Length fields also count the header are understood
+// too (SBCP_WIRE_HDRLEN). Strings are sent without a terminating NUL; a
+// trailing NUL from a peer is tolerated and stripped.
 
 #ifndef SBCP_CODEC_H
 #define SBCP_CODEC_H
@@ -17,15 +20,20 @@
 
 #define SBCP_HDR_LEN        4
 #define SBCP_ATTR_HDR_LEN   4
-#define SBCP_FRAME_MAX      65535       // Length is a 16-bit field
+#define SBCP_FRAME_MAX      65539       // 16-bit Length plus the header it does not count
+#define SBCP_GUESS_MS       250         // see sbcp_reader_guessing()
 
-// Byte layout of a message. NET is the spec and is what we send by default.
-// LEGACY is what a C bit-field struct {vrsn:9; type:7; length:16} looks like
-// when an x86 program write()s it without byte-order conversion, a common
-// student encoding; accepting it lets such peers interoperate with us.
+// How a peer writes messages. NET is the spec's byte order with Length
+// fields that leave out their own header; it is what we send by default and
+// what the course's reference server speaks. LEGACY is what a C bit-field
+// struct {vrsn:9; type:7; length:16} looks like when an x86 program write()s
+// it without byte-order conversion. HDRLEN is a flag for peers whose Length
+// fields also count the 4-byte header (another reading of the handout).
+// Accepting these lets such peers interoperate with us; we answer in kind.
 enum sbcp_wire {
     SBCP_WIRE_NET    = 0,
-    SBCP_WIRE_LEGACY = 1
+    SBCP_WIRE_LEGACY = 1,
+    SBCP_WIRE_HDRLEN = 2
 };
 
 // ---- Building messages -------------------------------------------------
@@ -63,13 +71,15 @@ struct sbcp_field {
     const uint8_t  *val;
 };
 
-// Decodes a 4-byte header in either layout. Returns 0, or -1 if the version
-// is not 3 (which also rejects text, HTTP and other garbage).
+// Decodes a 4-byte header in either byte layout; *len is the raw Length
+// field. Returns 0, or -1 if the version is not 3 (which also rejects text,
+// HTTP and other garbage).
 int sbcp_decode_header(const uint8_t *h, enum sbcp_wire *wire,
                        unsigned *type, size_t *len);
 
-// Validates one complete message: header, Length == n, and every attribute
-// inside the message. Returns 0, or -1 with *why describing the defect.
+// Validates one complete n-byte message: header, Length (n - 4, or n for an
+// HDRLEN peer; m->wire says which), and every attribute inside the message.
+// Returns 0, or -1 with *why describing the defect.
 int sbcp_parse(const uint8_t *frame, size_t n, struct sbcp_msg *m,
                const char **why);
 
@@ -112,6 +122,8 @@ struct sbcp_reader {
     size_t   start, end;                // unread bytes are buf[start, end)
     size_t   skip;                      // bytes of an oversized message left to drop
     int64_t  since_ms;                  // when the pending partial message began, -1 if none
+    int64_t  last_ms;                   // when bytes last arrived
+    int      hdrlen;                    // peer's Length fields count the header: 1, 0, -1 unknown
 };
 
 enum sbcp_rd {
@@ -122,6 +134,13 @@ enum sbcp_rd {
 
 int          sbcp_reader_init(struct sbcp_reader *r, size_t cap);
 void         sbcp_reader_free(struct sbcp_reader *r);
+// Fixes the peer's Length format (the HDRLEN bit of w) instead of learning it
+// from the first message.
+void         sbcp_reader_expect(struct sbcp_reader *r, enum sbcp_wire w);
+// Nonzero while the first message is complete in one format but could still
+// be the start of a longer message in the other. sbcp_reader_next() settles
+// it when more bytes arrive, or after SBCP_GUESS_MS without any.
+int          sbcp_reader_guessing(const struct sbcp_reader *r);
 uint8_t     *sbcp_reader_space(struct sbcp_reader *r, size_t *room);
 void         sbcp_reader_commit(struct sbcp_reader *r, size_t n, int64_t now);
 enum sbcp_rd sbcp_reader_next(struct sbcp_reader *r, const uint8_t **frame,

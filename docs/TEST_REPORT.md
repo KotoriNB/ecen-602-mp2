@@ -6,10 +6,10 @@ Test machine: _fill in: OS, kernel (`uname -r`), gcc version_
 ## 1. How we tested
 
 1. **Automated test suite** (`make test`, source `tests/test_sbcp.c`, written
-   in C, 75 cases). It starts the real `./server` and `./client` and talks to
+   in C, 77 cases). It starts the real `./server` and `./client` and talks to
    them over real sockets.
-   - **41 server cases** (`make test-server`) use raw connections that send
-     hand-written bytes: unit tests of the server's codec, the bonus features,
+   - **43 server cases** (`make test-server`) use raw connections that send
+     hand-written bytes, in both Length formats: unit tests of the server's codec, the bonus features,
      byte-exact messages, malformed input, and disconnect and
      resource-exhaustion cases (RST at every stage, a client that never reads,
      more connections than `FD_SETSIZE`, running out of descriptors). After
@@ -29,8 +29,9 @@ Test machine: _fill in: OS, kernel (`uname -r`), gcc version_
    each bonus feature (section 2). `./tests/demo.sh <scenario>` opens the
    server and its clients side by side in tmux and types the messages; the
    same steps can be typed by hand in four terminals.
-3. **Interoperability**: `tests/sbcp_probe <host> <port>` joins a server in
-   both byte layouts and shows which one it answers (section 4).
+3. **Interoperability**: the client against the course's reference server,
+   and `tests/sbcp_probe <host> <port>`, which joins a server in each message
+   format and shows which ones it answers (section 4).
 
 ## 2. Required test cases and bonus features
 
@@ -160,15 +161,16 @@ _Screen capture 7: here_
 
 | ID | Case | What it proves |
 |---|---|---|
-| U1 | encoder produces the exact bytes | JOIN, IDLE, ACK and the legacy JOIN match hand-computed bytes |
-| U2 | validator rejects malformed messages | 10 malformed messages rejected; zero padding tolerated |
+| U1 | encoder produces the exact bytes | JOIN, IDLE, ACK and the legacy JOIN match hand-computed bytes, in both Length formats |
+| U2 | validator rejects malformed messages | 14 malformed messages rejected in both Length formats; zero padding tolerated |
 | U3 | reassembler | byte-by-byte, coalesced, garbage, oversized and partial input |
 | U4 | text rules | NUL stripping, username rules, `^X` log sanitising |
 | U5 | both header layouts | all 128 type values decode in both layouts |
+| U6 | Length format learnt | from the first message: campus format at once; header-counting when the next header follows or after 250 ms of quiet; never misread byte by byte |
 | A5 | ACK/NAK/ONLINE/OFFLINE contents | counts, lists, reasons, FIN after NAK |
 | A6 | IDLE relay | relayed with the sender's name, once, reset by SEND, not spoofable |
 | A9 | `localhost` | server reachable over 127.0.0.1 and ::1 |
-| B1 | golden bytes | every message type byte-for-byte |
+| B1 | golden bytes | every message type byte-for-byte, in the reference server's format |
 | B2 | no spoofing | a Username inside SEND is ignored |
 | B3 | coalesced messages | two SENDs, and JOIN+SEND, in one segment |
 | B4 | split message | one SEND delivered one byte at a time |
@@ -178,10 +180,11 @@ _Screen capture 7: here_
 | B8 | legacy layout | little-endian bit-field peers answered in kind; mixed room works |
 | B10 | order | 300 messages arrive in order |
 | B11 | ACK order | members listed in join order, not descriptor order |
+| B12 | header-counting client | understood and answered in its own format next to campus-format clients; JOIN + SEND in one write; both formats byte by byte |
 | C1 | garbage | telnet text, HTTP, binary; connection still usable |
 | C2 | unknown types | discarded; the message after them still relayed |
 | C3 | server-only types from a client | FWD/ACK/NAK/ONLINE/OFFLINE ignored |
-| C4 | bad lengths | Length < 4, Length < bytes, attribute defects |
+| C4 | bad lengths | Length 0 and 2, Length < bytes, attribute defects |
 | C5 | incomplete message | discarded after 3 s; other clients unaffected meanwhile |
 | C6 | before JOIN | SEND and IDLE discarded; JOIN afterwards works |
 | C7 | second JOIN | ignored; identity unchanged |
@@ -246,14 +249,35 @@ Results:
 | Environment | Server cases | Client cases |
 |---|---|---|
 | _our test machine (fill in)_ | _fill in_ | _fill in_ |
-| Ubuntu 22.04, kernel 6.8, gcc 11.4, IPv6 | 41/41 pass | 34/34 pass |
-| Ubuntu 24.04 container, gcc 13.3 / clang 18, no IPv6 | 41/41 pass | 33/33 pass, I13 skipped |
-| same, client built with ASan + UBSan | | 33/33 pass, no reports |
+| Ubuntu 24.04 container, gcc 13.3 / clang 18, no IPv6 | 43/43 pass | 33/33 pass, I13 skipped |
+| same, both programs built with ASan + UBSan | 43/43 pass, no reports | 33/33 pass, no reports |
 
 ## 4. Interoperability
 
-`tests/sbcp_probe ecewkgsw05201.engr.tamu.edu 9000` (on campus or VPN) shows
-which byte layout the reference server speaks:
+The course's reference server runs at `ecewkgsw05201.engr.tamu.edu:9000`
+(campus network or VPN); its log is at
+`http://ecewkgsw05201.engr.tamu.edu:9002/`. Two of our clients join it, chat,
+go idle and leave while the log is watched:
+
+```sh
+watch -n 2 "curl -s 'http://ecewkgsw05201.engr.tamu.edu:9002/raw?n=25'"
+./client kotori_a ecewkgsw05201.engr.tamu.edu 9000      # second terminal
+./client kotori_b ecewkgsw05201.engr.tamu.edu 9000      # third terminal
+```
+
+| Step | Expected in the clients | Expected in the log |
+|---|---|---|
+| A joins, then B | A: `Client count: 1`; B: count and `Active users: kotori_a`; A: `<kotori_b> is online` | `JOIN (version: 3, length: 12)`, `USERNAME (length: 8)`, `New user`, `Sent ACK`, `Sent ONLINE` |
+| A types `hello` | B: `kotori_a: hello` | `SEND (… length: 9)`, then `FWD` forwarded to B |
+| a third `./client kotori_a …` | `Username already exists`, client exits | `Username kotori_a already exists`, `NAK` |
+| B silent 10 s | A: `kotori_b is idle` | `IDLE (version: 3, length: 0)` from B, `IDLE` to A |
+| Ctrl-D in B | A: `<kotori_b> is offline` | `Handler for kotori_b disconnected`, `OFFLINE` |
+| a 600-character line | the other client shows it in two messages | two SENDs, Message lengths 512 and 88 |
+
+_Screen captures of the clients and the matching log lines: here._
+
+`tests/sbcp_probe ecewkgsw05201.engr.tamu.edu 9000` shows which message
+formats the reference server answers:
 
 _Paste the probe output here._
 

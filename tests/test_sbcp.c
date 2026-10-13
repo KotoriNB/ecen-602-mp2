@@ -413,6 +413,7 @@ struct peer {
     int                used;
     int                fd;
     int                rd_ok;
+    enum sbcp_wire     wire;            // format it sends and expects back
     struct sbcp_reader rd;
 };
 
@@ -555,7 +556,7 @@ static int psend(struct peer *p, unsigned type, ...)
     size_t  n;
 
     va_start(ap, type);
-    n = vmk(buf, sizeof(buf), SBCP_WIRE_NET, type, ap);
+    n = vmk(buf, sizeof(buf), p->wire, type, ap);
     va_end(ap);
     return n ? peer_write(p, buf, n) : -1;
 }
@@ -568,6 +569,7 @@ static int peer_recv(struct peer *p, struct frame *f, int timeout_ms)
     if (!p->rd_ok) {
         if (sbcp_reader_init(&p->rd, SBCP_FRAME_MAX) < 0)
             return -1;
+        sbcp_reader_expect(&p->rd, p->wire);
         p->rd_ok = 1;
     }
     if (p->fd >= FD_SETSIZE) {
@@ -1168,20 +1170,25 @@ static void t_u1_encoder_golden(void)
     size_t  n;
 
     n = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_JOIN, ATTR_USERNAME, "alice", -1, 0);
-    CHECK(n == 13 && memcmp(buf, "\x01\x82\x00\x0d\x00\x02\x00\x09" "alice", 13) == 0,
+    CHECK(n == 13 && memcmp(buf, "\x01\x82\x00\x09\x00\x02\x00\x05" "alice", 13) == 0,
           "JOIN alice encodes wrong");
     n = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_IDLE, 0);
-    CHECK(n == 4 && memcmp(buf, "\x01\x89\x00\x04", 4) == 0, "IDLE encodes wrong");
+    CHECK(n == 4 && memcmp(buf, "\x01\x89\x00\x00", 4) == 0, "IDLE encodes wrong");
     n = mk(buf, sizeof(buf), SBCP_WIRE_LEGACY, TYPE_JOIN, ATTR_USERNAME, "alice", -1, 0);
-    CHECK(n == 13 && memcmp(buf, "\x03\x04\x0d\x00\x02\x00\x09\x00" "alice", 13) == 0,
+    CHECK(n == 13 && memcmp(buf, "\x03\x04\x09\x00\x02\x00\x05\x00" "alice", 13) == 0,
           "legacy JOIN encodes wrong");
+    n = mk(buf, sizeof(buf), SBCP_WIRE_HDRLEN, TYPE_JOIN, ATTR_USERNAME, "alice", -1, 0);
+    CHECK(n == 13 && memcmp(buf, "\x01\x82\x00\x0d\x00\x02\x00\x09" "alice", 13) == 0,
+          "header-counting JOIN encodes wrong");
+    n = mk(buf, sizeof(buf), SBCP_WIRE_HDRLEN, TYPE_IDLE, 0);
+    CHECK(n == 4 && memcmp(buf, "\x01\x89\x00\x04", 4) == 0, "header-counting IDLE encodes wrong");
     {
         struct sbcp_builder b;
 
         sbcp_begin(&b, buf, sizeof(buf), SBCP_WIRE_NET, TYPE_ACK);
         sbcp_add_u16(&b, ATTR_CLIENT_COUNT, 258);
         n = sbcp_finish(&b);
-        CHECK(n == 10 && memcmp(buf, "\x01\x87\x00\x0a\x00\x03\x00\x06\x01\x02", 10) == 0,
+        CHECK(n == 10 && memcmp(buf, "\x01\x87\x00\x06\x00\x03\x00\x02\x01\x02", 10) == 0,
               "ACK count encodes wrong");
         sbcp_begin(&b, buf, 8, SBCP_WIRE_NET, TYPE_SEND);
         sbcp_add_attr(&b, ATTR_MESSAGE, "too long", 8);
@@ -1206,6 +1213,10 @@ static void t_u2_parser_rejects(void)
         { "\x01\x84\x00\x0a\x00\x04\x00\x10hi", 10, "attribute overruns" },
         { "\x01\x84\x00\x08\x00\x04\x00\x05",    8, "attribute Length past end" },
         { "\x01\x84\x00\x09\x00\x04\x00\x04z",   9, "stray byte" },
+        { "\x01\x84\x00\x01",                    4, "campus: Length above bytes" },
+        { "\x01\x84\x00\x02\x00\x04",            6, "campus: half an attribute header" },
+        { "\x01\x84\x00\x06\x00\x04\x00\x05hi", 10, "campus: attribute overruns" },
+        { "\x01\x84\x00\x07\x00\x04\x00\x02hiz", 11, "campus: stray byte" },
     };
     struct sbcp_msg m;
     const char     *why;
@@ -1218,7 +1229,19 @@ static void t_u2_parser_rejects(void)
     CHECK(sbcp_parse((const uint8_t *)"\x01\x84\x00\x0b\x00\x04\x00\x05x\x00\x00", 11,
                      &m, &why) == 0, "zero padding after the last attribute rejected");
     CHECK(sbcp_parse((const uint8_t *)"\x01\x89\x00\x04", 4, &m, &why) == 0 &&
-          m.type == TYPE_IDLE, "bare IDLE rejected");
+          m.type == TYPE_IDLE && m.wire == SBCP_WIRE_HDRLEN, "header-counting bare IDLE rejected");
+    CHECK(sbcp_parse((const uint8_t *)"\x01\x89\x00\x00", 4, &m, &why) == 0 &&
+          m.type == TYPE_IDLE && m.wire == SBCP_WIRE_NET, "bare IDLE rejected");
+    CHECK(sbcp_parse((const uint8_t *)"\x01\x84\x00\x07\x00\x04\x00\x02hi\x00", 11,
+                     &m, &why) == 0, "campus: zero padding rejected");
+    {
+        struct sbcp_field a;
+
+        CHECK(sbcp_parse((const uint8_t *)"\x01\x83\x00\x0f\x00\x04\x00\x02" "hi" "\x00\x02\x00\x05" "alice",
+                         19, &m, &why) == 0 && sbcp_find_attr(&m, ATTR_USERNAME, &a) &&
+              a.len == 5 && memcmp(a.val, "alice", 5) == 0 &&
+              sbcp_find_attr(&m, ATTR_MESSAGE, &a) && a.len == 2, "campus FWD misread");
+    }
 }
 
 static void t_u3_reader(void)
@@ -1235,6 +1258,7 @@ static void t_u3_reader(void)
     n2 = mk(stream + n1, sizeof(stream) - n1, SBCP_WIRE_NET, TYPE_SEND,
             ATTR_MESSAGE, "second", -1, 0);
     CHECK(sbcp_reader_init(&r, 64) == 0, "reader init");
+    sbcp_reader_expect(&r, SBCP_WIRE_NET);
 
     // One byte at a time: exactly two frames, each only once complete.
     for (i = 0; i < n1 + n2; i++) {
@@ -1268,16 +1292,16 @@ static void t_u3_reader(void)
 
     // Oversized (Length 1000 > cap 64): skipped exactly, then the next frame.
     {
-        uint8_t big[1000 + 64];
+        uint8_t big[1004 + 64];
 
         memset(big, 'x', sizeof(big));
         big[0] = 0x01; big[1] = 0x84; big[2] = 0x03; big[3] = 0xE8;
-        memcpy(big + 1000, stream, n1);
-        for (i = 0; i < 1000 + n1; ) {
+        memcpy(big + 1004, stream, n1);
+        for (i = 0; i < 1004 + n1; ) {
             size_t k;
 
             sp = sbcp_reader_space(&r, &room);
-            k = room < 1000 + n1 - i ? room : 1000 + n1 - i;
+            k = room < 1004 + n1 - i ? room : 1004 + n1 - i;
             memcpy(sp, big + i, k);
             sbcp_reader_commit(&r, k, 0);
             i += k;
@@ -1346,6 +1370,77 @@ static void t_u5_legacy_header(void)
               type == t && len == 0x0102, "network layout type %u", t);
         CHECK(sbcp_decode_header(leg, &w, &type, &len) == 0 && w == SBCP_WIRE_LEGACY &&
               type == t && len == 0x0102, "legacy layout type %u", t);
+    }
+}
+
+// How a peer counts Length is learnt from its first message, never guessed
+// wrong half way through one.
+static void t_u6_length_format(void)
+{
+    uint8_t            msg[128];
+    struct sbcp_reader r;
+    const uint8_t     *f;
+    const char        *why;
+    size_t             n, n1, flen, room, i;
+    uint8_t           *sp;
+    enum sbcp_rd       rd;
+
+    // Campus format, whole: settled at once.
+    n = mk(msg, sizeof(msg), SBCP_WIRE_NET, TYPE_JOIN, ATTR_USERNAME, "caleb", -1, 0);
+    CHECK(sbcp_reader_init(&r, 256) == 0, "reader init");
+    sp = sbcp_reader_space(&r, &room);
+    memcpy(sp, msg, n);
+    sbcp_reader_commit(&r, n, 0);
+    CHECK(sbcp_reader_next(&r, &f, &flen, &why, 0) == SBCP_RD_FRAME && flen == n &&
+          r.hdrlen == 0, "campus-format JOIN not framed at once");
+    sbcp_reader_free(&r);
+
+    // Header-counting format, whole and nothing after it: settled by a quiet spell.
+    n = mk(msg, sizeof(msg), SBCP_WIRE_HDRLEN, TYPE_JOIN, ATTR_USERNAME, "alice", -1, 0);
+    CHECK(sbcp_reader_init(&r, 256) == 0, "reader init");
+    sp = sbcp_reader_space(&r, &room);
+    memcpy(sp, msg, n);
+    sbcp_reader_commit(&r, n, 1000);
+    CHECK(sbcp_reader_next(&r, &f, &flen, &why, 1000) == SBCP_RD_MORE &&
+          sbcp_reader_guessing(&r), "header-counting JOIN decided before the quiet spell");
+    CHECK(sbcp_reader_next(&r, &f, &flen, &why, 1000 + SBCP_GUESS_MS) == SBCP_RD_FRAME &&
+          flen == n && r.hdrlen == 1 && !sbcp_reader_guessing(&r),
+          "header-counting JOIN not framed after the quiet spell");
+    sbcp_reader_free(&r);
+
+    // Header-counting JOIN and SEND together: the second header settles it at once.
+    n1 = mk(msg, sizeof(msg), SBCP_WIRE_HDRLEN, TYPE_JOIN, ATTR_USERNAME, "alice", -1, 0);
+    n  = n1 + mk(msg + n1, sizeof(msg) - n1, SBCP_WIRE_HDRLEN, TYPE_SEND, ATTR_MESSAGE, "hi", -1, 0);
+    CHECK(sbcp_reader_init(&r, 256) == 0, "reader init");
+    sp = sbcp_reader_space(&r, &room);
+    memcpy(sp, msg, n);
+    sbcp_reader_commit(&r, n, 0);
+    CHECK(sbcp_reader_next(&r, &f, &flen, &why, 0) == SBCP_RD_FRAME && flen == n1 &&
+          r.hdrlen == 1, "header-counting JOIN + SEND: first frame");
+    CHECK(sbcp_reader_next(&r, &f, &flen, &why, 0) == SBCP_RD_FRAME && flen == n - n1,
+          "header-counting JOIN + SEND: second frame");
+    sbcp_reader_free(&r);
+
+    // Campus format one byte every 10 ms, 4- and 5-letter names (where both
+    // formats fit the bytes so far): never framed early, never in the other format.
+    for (i = 0; i < 2; i++) {
+        size_t k;
+        int    early = 0;
+
+        n = mk(msg, sizeof(msg), SBCP_WIRE_NET, TYPE_JOIN, ATTR_USERNAME,
+               i == 0 ? "dave" : "caleb", -1, 0);
+        CHECK(sbcp_reader_init(&r, 256) == 0, "reader init");
+        for (k = 0; k < n; k++) {
+            sp = sbcp_reader_space(&r, &room);
+            *sp = msg[k];
+            sbcp_reader_commit(&r, 1, (int64_t)k * 10);
+            rd = sbcp_reader_next(&r, &f, &flen, &why, (int64_t)k * 10);
+            if (k + 1 < n && rd != SBCP_RD_MORE)
+                early = 1;
+        }
+        CHECK(!early && rd == SBCP_RD_FRAME && flen == n && r.hdrlen == 0,
+              "%s JOIN byte by byte misread", i == 0 ? "4-letter" : "5-letter");
+        sbcp_reader_free(&r);
     }
 }
 
@@ -1477,35 +1572,35 @@ static void t_b1_golden_bytes(void)
 
     CHECK(s != NULL, "server did not start");
     pa = peer_connect(s->probe, s->port);
-    CHECK(pa && peer_write(pa, "\x01\x82\x00\x0d\x00\x02\x00\x09" "alice", 13) == 0, "JOIN alice");
-    CHECK(peer_recv(pa, &f, T(2000)) == 1 && GOLDEN(&f, "\x01\x87\x00\x0a\x00\x03\x00\x06\x00\x01"),
+    CHECK(pa && peer_write(pa, "\x01\x82\x00\x09\x00\x02\x00\x05" "alice", 13) == 0, "JOIN alice");
+    CHECK(peer_recv(pa, &f, T(2000)) == 1 && GOLDEN(&f, "\x01\x87\x00\x06\x00\x03\x00\x02\x00\x01"),
           "ACK for alice");
 
     pb = peer_connect(s->probe, s->port);
-    CHECK(pb && peer_write(pb, "\x01\x82\x00\x0b\x00\x02\x00\x07" "bob", 11) == 0, "JOIN bob");
+    CHECK(pb && peer_write(pb, "\x01\x82\x00\x07\x00\x02\x00\x03" "bob", 11) == 0, "JOIN bob");
     CHECK(peer_recv(pb, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x87\x00\x13\x00\x03\x00\x06\x00\x02\x00\x02\x00\x09" "alice"),
+          GOLDEN(&f, "\x01\x87\x00\x0f\x00\x03\x00\x02\x00\x02\x00\x02\x00\x05" "alice"),
           "ACK for bob");
     CHECK(peer_recv(pa, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x88\x00\x0b\x00\x02\x00\x07" "bob"), "ONLINE bob");
+          GOLDEN(&f, "\x01\x88\x00\x07\x00\x02\x00\x03" "bob"), "ONLINE bob");
 
-    CHECK(peer_write(pa, "\x01\x84\x00\x0a\x00\x04\x00\x06" "hi", 10) == 0, "SEND hi");
+    CHECK(peer_write(pa, "\x01\x84\x00\x06\x00\x04\x00\x02" "hi", 10) == 0, "SEND hi");
     CHECK(peer_recv(pb, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x83\x00\x13\x00\x04\x00\x06" "hi" "\x00\x02\x00\x09" "alice"),
+          GOLDEN(&f, "\x01\x83\x00\x0f\x00\x04\x00\x02" "hi" "\x00\x02\x00\x05" "alice"),
           "FWD hi");
 
-    CHECK(peer_write(pb, "\x01\x89\x00\x04", 4) == 0, "IDLE");
+    CHECK(peer_write(pb, "\x01\x89\x00\x00", 4) == 0, "IDLE");
     CHECK(peer_recv(pa, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x89\x00\x0b\x00\x02\x00\x07" "bob"), "IDLE relay");
+          GOLDEN(&f, "\x01\x89\x00\x07\x00\x02\x00\x03" "bob"), "IDLE relay");
 
     pc = peer_connect(s->probe, s->port);
-    CHECK(pc && peer_write(pc, "\x01\x82\x00\x0d\x00\x02\x00\x09" "alice", 13) == 0, "dup JOIN");
+    CHECK(pc && peer_write(pc, "\x01\x82\x00\x09\x00\x02\x00\x05" "alice", 13) == 0, "dup JOIN");
     CHECK(peer_recv(pc, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x85\x00\x1f\x00\x01\x00\x1b" "Username already in use"), "NAK");
+          GOLDEN(&f, "\x01\x85\x00\x1b\x00\x01\x00\x17" "Username already in use"), "NAK");
 
     peer_free(pb);
     CHECK(peer_recv(pa, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x86\x00\x0b\x00\x02\x00\x07" "bob"), "OFFLINE bob");
+          GOLDEN(&f, "\x01\x86\x00\x07\x00\x02\x00\x03" "bob"), "OFFLINE bob");
 }
 
 static void t_b2_no_spoofing(void)
@@ -1698,12 +1793,12 @@ static void t_b8_legacy_layout(void)
     n  = mk(buf, sizeof(buf), SBCP_WIRE_LEGACY, TYPE_JOIN, ATTR_USERNAME, "leg", -1, 0);
     CHECK(pl && peer_write(pl, buf, n) == 0, "legacy JOIN");
     CHECK(peer_recv(pl, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x03\x0e\x0a\x00\x03\x00\x06\x00\x01\x00"), "legacy ACK");
+          GOLDEN(&f, "\x03\x0e\x06\x00\x03\x00\x02\x00\x01\x00"), "legacy ACK");
 
     pn = join_as(s, "net");
     CHECK(pn != NULL, "network-order client");
     CHECK(peer_recv(pl, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x03\x10\x0b\x00\x02\x00\x07\x00" "net"), "legacy ONLINE");
+          GOLDEN(&f, "\x03\x10\x07\x00\x02\x00\x03\x00" "net"), "legacy ONLINE");
 
     n = mk(buf, sizeof(buf), SBCP_WIRE_LEGACY, TYPE_SEND, ATTR_MESSAGE, "from leg", -1, 0);
     CHECK(peer_write(pl, buf, n) == 0 && expect_msg(pn, TYPE_FWD, "leg", "from leg", T(2000)),
@@ -1761,6 +1856,69 @@ static void t_b11_ack_join_order(void)
     CHECK(m3 && join_reply(m3, "third", -1, &f) == 1 && f.ok && f.m.type == TYPE_ACK, "third");
     fr_names(&f, names, sizeof(names));
     CHECK(strcmp(names, "first,second") == 0, "ACK list \"%s\", expected join order", names);
+}
+
+// A client whose Length fields also count the 4-byte headers (the other
+// reading of the handout) is understood and answered in its own format, next
+// to campus-format clients.
+static void t_b12_header_counting_client(void)
+{
+    static struct frame f;
+    uint8_t             buf[128];
+    size_t              n, i;
+    struct srv         *s = srv_start("127.0.0.1", 6);
+    struct peer        *pa, *ph, *pq, *pr, *pt;
+
+    CHECK(s != NULL, "server did not start");
+    pa = join_as(s, "alice");
+    CHECK(pa != NULL, "setup");
+
+    ph = peer_connect(s->probe, s->port);
+    CHECK(ph != NULL, "connect");
+    ph->wire = SBCP_WIRE_HDRLEN;
+    CHECK(peer_write(ph, "\x01\x82\x00\x0b\x00\x02\x00\x07" "hdr", 11) == 0, "JOIN hdr");
+    CHECK(peer_recv(ph, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x87\x00\x13\x00\x03\x00\x06\x00\x02\x00\x02\x00\x09" "alice"),
+          "ACK not in the client's format");
+    CHECK(expect_msg(pa, TYPE_ONLINE, "hdr", NULL, T(2000)), "ONLINE hdr to a campus-format client");
+    CHECK(peer_write(ph, "\x01\x84\x00\x0a\x00\x04\x00\x06" "hi", 10) == 0 &&
+          expect_msg(pa, TYPE_FWD, "hdr", "hi", T(2000)), "SEND from hdr not relayed");
+    CHECK(psend(pa, TYPE_SEND, ATTR_MESSAGE, "yo", -1, 0) == 0 && peer_recv(ph, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x83\x00\x13\x00\x04\x00\x06" "yo" "\x00\x02\x00\x09" "alice"),
+          "FWD not in the client's format");
+    CHECK(peer_write(ph, "\x01\x89\x00\x04", 4) == 0 &&
+          expect_msg(pa, TYPE_IDLE, "hdr", NULL, T(2000)), "IDLE from hdr not relayed");
+
+    // JOIN and SEND in one write: the second header settles the format at once.
+    pq = peer_connect(s->probe, s->port);
+    CHECK(pq != NULL, "connect");
+    pq->wire = SBCP_WIRE_HDRLEN;
+    n  = mk(buf, sizeof(buf), SBCP_WIRE_HDRLEN, TYPE_JOIN, ATTR_USERNAME, "quick", -1, 0);
+    n += mk(buf + n, sizeof(buf) - n, SBCP_WIRE_HDRLEN, TYPE_SEND, ATTR_MESSAGE, "both", -1, 0);
+    CHECK(peer_write(pq, buf, n) == 0, "write");
+    CHECK(expect_msg(pq, TYPE_ACK, NULL, NULL, T(2000)), "no ACK for JOIN + SEND in one write");
+    CHECK(wait_for(pa, TYPE_FWD, "quick", "both", T(2000)), "SEND after the JOIN not relayed");
+
+    // One byte every 20 ms, in both formats: no wrong guess half way.
+    pr = peer_connect(s->probe, s->port);
+    CHECK(pr != NULL, "connect");
+    n = mk(buf, sizeof(buf), SBCP_WIRE_NET, TYPE_JOIN, ATTR_USERNAME, "slow", -1, 0);
+    for (i = 0; i < n; i++) {
+        CHECK(peer_write(pr, buf + i, 1) == 0, "write");
+        msleep(20);
+    }
+    CHECK(expect_msg(pr, TYPE_ACK, NULL, NULL, T(2000)), "campus-format JOIN byte by byte");
+    pt = peer_connect(s->probe, s->port);
+    CHECK(pt != NULL, "connect");
+    pt->wire = SBCP_WIRE_HDRLEN;
+    n = mk(buf, sizeof(buf), SBCP_WIRE_HDRLEN, TYPE_JOIN, ATTR_USERNAME, "slower", -1, 0);
+    for (i = 0; i < n; i++) {
+        CHECK(peer_write(pt, buf + i, 1) == 0, "write");
+        msleep(20);
+    }
+    CHECK(expect_msg(pt, TYPE_ACK, NULL, NULL, T(2000)), "header-counting JOIN byte by byte");
+    CHECK(wait_for(pa, TYPE_ONLINE, "slower", NULL, T(2000)), "ONLINE slower");
+    CHECK(log_has(s, "counts the 4-byte headers"), "format not logged");
 }
 
 // ============================================================================
@@ -1846,16 +2004,16 @@ static void t_c4_bad_lengths(void)
 
     CHECK(s != NULL, "setup");
 
-    // Length below the header size.
-    CHECK(peer_write(pa, "\x01\x84\x00\x02", 4) == 0, "len 2");
-    msleep(150);
+    // Length 0 (no attributes), and Length 2 (half an attribute header).
     CHECK(peer_write(pa, "\x01\x84\x00\x00", 4) == 0, "len 0");
+    msleep(150);
+    CHECK(peer_write(pa, "\x01\x84\x00\x02\x00\x04", 6) == 0, "len 2");
     msleep(150);
     CHECK(psend(pa, TYPE_SEND, ATTR_MESSAGE, "after short", -1, 0) == 0 &&
           expect_msg(pb, TYPE_FWD, "alice", "after short", T(2000)), "after Length < 4");
 
     // Length smaller than the bytes sent: attribute overruns the message.
-    CHECK(peer_write(pa, "\x01\x84\x00\x08\x00\x04\x00\x0e" "abcdefghij", 18) == 0, "len short");
+    CHECK(peer_write(pa, "\x01\x84\x00\x04\x00\x04\x00\x0a" "abcdefghij", 18) == 0, "len short");
     msleep(150);
     CHECK(expect_none(pb, 100), "truncated message forwarded");
     CHECK(psend(pa, TYPE_SEND, ATTR_MESSAGE, "after overrun", -1, 0) == 0 &&
@@ -1863,12 +2021,12 @@ static void t_c4_bad_lengths(void)
 
     // Attribute-level defects with correct message framing: one write.
     memset(big, 0, sizeof(big));
-    memcpy(big, "\x01\x84\x00\x08\x00\x04\x00\x02"                    // attr Length 2
-                "\x01\x84\x00\x0a\x00\x04\x00\x10" "hi"               // attr overruns
-                "\x01\x84\x00\x0c\x00\x04\x00\x05" "x" "\x07\x07\x07" // stray bytes
-                "\x01\x84\x00\x0c\x00\x04\x00\x07" "pad" "\x00"       // zero pad: OK
-                "\x01\x84\x00\x17\x00\x04\x00\x09" "first" "\x00\x04\x00\x0a" "second"
-                "\x01\x84\x00\x10\x00\x63\x00\x05" "?" "\x00\x04\x00\x07" "unk",
+    memcpy(big, "\x01\x84\x00\x04\x00\x04\x00\x02"                    // attr past the end
+                "\x01\x84\x00\x06\x00\x04\x00\x10" "hi"               // attr overruns
+                "\x01\x84\x00\x08\x00\x04\x00\x01" "x" "\x07\x07\x07" // stray bytes
+                "\x01\x84\x00\x08\x00\x04\x00\x03" "pad" "\x00"       // zero pad: OK
+                "\x01\x84\x00\x13\x00\x04\x00\x05" "first" "\x00\x04\x00\x06" "second"
+                "\x01\x84\x00\x0c\x00\x63\x00\x01" "?" "\x00\x04\x00\x03" "unk",
            8 + 10 + 12 + 12 + 23 + 16);
     CHECK(peer_write(pa, big, 8 + 10 + 12 + 12 + 23 + 16) == 0, "write");
     CHECK(expect_msg(pb, TYPE_FWD, "alice", "pad", T(2000)), "zero padding should be tolerated");
@@ -1939,7 +2097,7 @@ static void t_c8_oversized(void)
 
     CHECK(s != NULL, "setup");
     memset(big, 'z', sizeof(big));
-    big[0] = 0x01; big[1] = 0x84; big[2] = 0xEA; big[3] = 0x60;     // Length 60000
+    big[0] = 0x01; big[1] = 0x84; big[2] = 0xEA; big[3] = 0x5C;     // 60000 bytes: Length 59996
     n = 60000 + mk(big + 60000, 64, SBCP_WIRE_NET, TYPE_SEND, ATTR_MESSAGE,
                    "after big", -1, 0);
     CHECK(peer_write(pa, big, n) == 0, "write");
@@ -2840,7 +2998,7 @@ static void t_i18_big_ack(void)
     for (i = 0; i < 55; i++) {
         char name[MAX_USERNAME_LEN + 1];
 
-        snprintf(name, sizeof(name), "member_%02d_xxxxx", i);
+        snprintf(name, sizeof(name), "member_%02u_xxxxx", (unsigned)i % 100u);
         CHECK(join_as(s, name) != NULL, "member %d did not join", i);
     }
     c = cli_start("frank", "127.0.0.1", s->port, NULL);
@@ -2986,14 +3144,14 @@ static void t_i24_exact_bytes(void)
 
     conn = fake_join(&c, "alice");
     CHECK(conn != NULL, "client did not connect and JOIN");
-    CHECK(GOLDEN(&join_frame, "\x01\x82\x00\x0d\x00\x02\x00\x09" "alice"), "JOIN bytes");
+    CHECK(GOLDEN(&join_frame, "\x01\x82\x00\x09\x00\x02\x00\x05" "alice"), "JOIN bytes");
     CHECK(psend(conn, TYPE_ACK, ATTR_CLIENT_COUNT, "\x00\x01", 2, 0) == 0 &&
           cli_expect(c, "Client count: 1", T(2000)), "ACK not shown");
     CHECK(cli_say(c, "hi") == 0 && peer_recv(conn, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x84\x00\x0a\x00\x04\x00\x06" "hi"), "SEND bytes");
+          GOLDEN(&f, "\x01\x84\x00\x06\x00\x04\x00\x02" "hi"), "SEND bytes");
     t0 = now_ms();
     CHECK(cli_write(c, "\n", 1) == 0 && expect_none(conn, T(1000)), "an empty line sent something");
-    CHECK(peer_recv(conn, &f, T(12000)) == 1 && GOLDEN(&f, "\x01\x89\x00\x04"), "IDLE bytes");
+    CHECK(peer_recv(conn, &f, T(12000)) == 1 && GOLDEN(&f, "\x01\x89\x00\x00"), "IDLE bytes");
     dt = now_ms() - t0;
     CHECK(dt >= 9000 && dt <= 12000, "IDLE %lld ms after the SEND", (long long)dt);
 }
@@ -3245,6 +3403,7 @@ static const struct test TESTS[] = {
     { "U3",  "reassembler: split, coalesced, garbage, oversized",       t_u3_reader, 0 },
     { "U4",  "username/text rules and display sanitising",              t_u4_text_rules, 0 },
     { "U5",  "both header layouts decode for all 128 types",            t_u5_legacy_header, 0 },
+    { "U6",  "Length format learnt from the first message",             t_u6_length_format, 0 },
     { "A5",  "bonus: ACK/NAK/ONLINE/OFFLINE contents",                  t_a5_ack_nak_online_offline, 0 },
     { "A6",  "bonus: IDLE relayed once, with the sender's name",        t_a6_idle_relay, 0 },
     { "A9",  "server on \"localhost\" takes IPv4 and IPv6",             t_a9_localhost, 0 },
@@ -3258,6 +3417,7 @@ static const struct test TESTS[] = {
     { "B8",  "legacy little-endian peers interoperate",                 t_b8_legacy_layout, 0 },
     { "B10", "300 messages arrive in order",                            t_b10_order, 0 },
     { "B11", "ACK lists members in join order",                         t_b11_ack_join_order, 0 },
+    { "B12", "client counting headers in Length: answered in kind",     t_b12_header_counting_client, 0 },
     { "C1",  "text/HTTP/binary garbage discarded",                      t_c1_garbage, 0 },
     { "C2",  "unknown message types discarded, framing kept",           t_c2_unknown_type, 0 },
     { "C3",  "server-only message types from a client discarded",       t_c3_server_only_types, 0 },

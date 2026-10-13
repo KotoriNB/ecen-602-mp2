@@ -44,7 +44,7 @@ struct outq {
 struct client {
     int                 fd;
     enum cstate         state;
-    enum sbcp_wire      wire;           // layout this peer speaks; we answer in kind
+    enum sbcp_wire      wire;           // format this peer speaks; we answer in kind
     int                 wire_known;
     int                 idle;           // bonus: sent IDLE and no SEND since
     int                 dead;           // closed at the end of this round by reap()
@@ -210,9 +210,9 @@ static size_t build(uint8_t *buf, size_t cap, enum sbcp_wire wire,
 static int broadcast(const struct client *except, unsigned type,
                      const char *user, const void *text, size_t textlen)
 {
-    uint8_t buf[2][SBCP_HDR_LEN + 2 * SBCP_ATTR_HDR_LEN +
+    uint8_t buf[4][SBCP_HDR_LEN + 2 * SBCP_ATTR_HDR_LEN +
                    MAX_MESSAGE_LEN + MAX_USERNAME_LEN];
-    size_t  len[2] = { 0, 0 };          // built lazily, once per layout
+    size_t  len[4] = { 0, 0, 0, 0 };    // built lazily, once per format
     int     fd, count = 0;
 
     for (fd = 0; fd <= hi_fd; fd++) {
@@ -469,8 +469,11 @@ static void dispatch(struct client *c, const uint8_t *frame, size_t len)
     if (!c->wire_known) {
         c->wire_known = 1;
         c->wire       = m.wire;
-        if (m.wire == SBCP_WIRE_LEGACY)
+        if (m.wire & SBCP_WIRE_LEGACY)
             log_info("%s uses the little-endian bit-field layout; answering in kind",
+                     c->peer);
+        if (m.wire & SBCP_WIRE_HDRLEN)
+            log_info("%s counts the 4-byte headers in its Length fields; answering in kind",
                      c->peer);
     }
 
@@ -491,15 +494,27 @@ static void dispatch(struct client *c, const uint8_t *frame, size_t len)
     }
 }
 
-static void on_readable(struct client *c)
+static void process_frames(struct client *c, int64_t now)
 {
     const uint8_t *frame;
     const char    *why;
-    size_t         room, flen;
+    size_t         flen;
+    enum sbcp_rd   r;
+
+    while (!c->dead && c->state != ST_REJECTED &&
+           (r = sbcp_reader_next(&c->rd, &frame, &flen, &why, now)) != SBCP_RD_MORE) {
+        if (r == SBCP_RD_JUNK)
+            log_info("%s: %s", who(c), why);
+        else
+            dispatch(c, frame, flen);
+    }
+}
+
+static void on_readable(struct client *c)
+{
+    size_t         room;
     uint8_t       *p;
     ssize_t        n;
-    int64_t        now;
-    enum sbcp_rd   r;
 
     p = sbcp_reader_space(&c->rd, &room);
     if (room == 0) {                    // cannot happen: a full buffer holds a whole message
@@ -523,16 +538,8 @@ static void on_readable(struct client *c)
     if (c->state == ST_REJECTED)
         return;
 
-    now = now_ms();
-    sbcp_reader_commit(&c->rd, (size_t)n, now);
-
-    while (!c->dead && c->state != ST_REJECTED &&
-           (r = sbcp_reader_next(&c->rd, &frame, &flen, &why, now)) != SBCP_RD_MORE) {
-        if (r == SBCP_RD_JUNK)
-            log_info("%s: %s", who(c), why);
-        else
-            dispatch(c, frame, flen);
-    }
+    sbcp_reader_commit(&c->rd, (size_t)n, now_ms());
+    process_frames(c, now_ms());
 }
 
 // ---- Connections ------------------------------------------------------------
@@ -651,7 +658,8 @@ static void accept_clients(int lfd)
     }
 }
 
-// Rejected clients that never hang up, and messages that never complete.
+// Rejected clients that never hang up, messages that never complete, and a
+// first message whose Length format is settled by a quiet spell.
 // Returns milliseconds until the next deadline, or -1 if there is none.
 static int64_t run_timers(int64_t now)
 {
@@ -665,12 +673,23 @@ static int64_t run_timers(int64_t now)
         if (c == NULL || c->dead)
             continue;
 
+        // A first message that is complete in the header-counting format and
+        // nothing more arrived: settle the format and handle it.
+        if (c->state != ST_REJECTED && sbcp_reader_guessing(&c->rd) &&
+            now >= c->rd.last_ms + SBCP_GUESS_MS) {
+            process_frames(c, now);
+            if (c->dead)
+                continue;
+        }
+
         if (c->state == ST_REJECTED) {
             due = c->linger_until;
             if (now >= due) {
                 kill_client(c, "closed by the server after its NAK");
                 continue;
             }
+        } else if (sbcp_reader_guessing(&c->rd)) {
+            due = c->rd.last_ms + SBCP_GUESS_MS;
         } else if (sbcp_reader_pending(&c->rd)) {
             due = c->rd.since_ms + PARTIAL_TIMEOUT_MS;
             if (now >= due) {

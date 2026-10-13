@@ -7,17 +7,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define LEGACY(w)   (((w) & SBCP_WIRE_LEGACY) != 0)
+#define HDRLEN(w)   (((w) & SBCP_WIRE_HDRLEN) != 0)
+#define LENGTH_MAX  0xFFFFu
+
 // 16-bit fields: big-endian on the NET layout, little-endian on LEGACY.
 static unsigned get16(const uint8_t *p, enum sbcp_wire w)
 {
-    if (w == SBCP_WIRE_LEGACY)
+    if (LEGACY(w))
         return (unsigned)p[0] | (unsigned)p[1] << 8;
     return (unsigned)p[0] << 8 | (unsigned)p[1];
 }
 
 static void put16(uint8_t *p, unsigned v, enum sbcp_wire w)
 {
-    if (w == SBCP_WIRE_LEGACY) {
+    if (LEGACY(w)) {
         p[0] = (uint8_t)(v & 0xFF);
         p[1] = (uint8_t)(v >> 8 & 0xFF);
     } else {
@@ -51,7 +55,7 @@ int sbcp_decode_header(const uint8_t *h, enum sbcp_wire *wire,
 
 static void put_header(uint8_t *h, enum sbcp_wire w, unsigned type, size_t len)
 {
-    if (w == SBCP_WIRE_LEGACY)
+    if (LEGACY(w))
         put16(h, SBCP_VERSION | (type & 0x7Fu) << 9, w);
     else
         put16(h, SBCP_VERSION << 7 | (type & 0x7Fu), w);
@@ -61,8 +65,10 @@ static void put_header(uint8_t *h, enum sbcp_wire w, unsigned type, size_t len)
 void sbcp_begin(struct sbcp_builder *b, uint8_t *buf, size_t cap,
                 enum sbcp_wire wire, unsigned type)
 {
+    size_t most = LENGTH_MAX + (HDRLEN(wire) ? 0 : SBCP_HDR_LEN);
+
     b->buf      = buf;
-    b->cap      = cap < SBCP_FRAME_MAX ? cap : SBCP_FRAME_MAX;
+    b->cap      = cap < most ? cap : most;
     b->len      = SBCP_HDR_LEN;
     b->wire     = wire;
     b->type     = type;
@@ -79,7 +85,7 @@ void sbcp_add_attr(struct sbcp_builder *b, unsigned type,
         return;
     }
     put16(b->buf + b->len, type, b->wire);
-    put16(b->buf + b->len + 2, (unsigned)total, b->wire);
+    put16(b->buf + b->len + 2, (unsigned)(HDRLEN(b->wire) ? total : len), b->wire);
     if (len > 0)
         memcpy(b->buf + b->len + SBCP_ATTR_HDR_LEN, val, len);
     b->len += total;
@@ -97,8 +103,15 @@ size_t sbcp_finish(struct sbcp_builder *b)
 {
     if (b->overflow)
         return 0;
-    put_header(b->buf, b->wire, b->type, b->len);
+    put_header(b->buf, b->wire, b->type,
+               HDRLEN(b->wire) ? b->len : b->len - SBCP_HDR_LEN);
     return b->len;
+}
+
+// Bytes an attribute takes up, from its raw Length field.
+static size_t attr_span(size_t alen, enum sbcp_wire w)
+{
+    return HDRLEN(w) ? alen : SBCP_ATTR_HDR_LEN + alen;
 }
 
 int sbcp_parse(const uint8_t *f, size_t n, struct sbcp_msg *m, const char **why)
@@ -113,7 +126,11 @@ int sbcp_parse(const uint8_t *f, size_t n, struct sbcp_msg *m, const char **why)
         *why = "not SBCP version 3";
         return -1;
     }
-    if (declared != n) {
+    if (declared + SBCP_HDR_LEN == n) {
+        // the reference server's format
+    } else if (declared == n) {
+        m->wire = (enum sbcp_wire)(m->wire | SBCP_WIRE_HDRLEN);
+    } else {
         *why = "Length field does not match the bytes received";
         return -1;
     }
@@ -127,15 +144,15 @@ int sbcp_parse(const uint8_t *f, size_t n, struct sbcp_msg *m, const char **why)
     while (m->payload_len - pos >= SBCP_ATTR_HDR_LEN) {
         size_t alen = get16(m->payload + pos + 2, m->wire);
 
-        if (alen < SBCP_ATTR_HDR_LEN) {
+        if (HDRLEN(m->wire) && alen < SBCP_ATTR_HDR_LEN) {
             *why = "attribute Length smaller than its header";
             return -1;
         }
-        if (alen > m->payload_len - pos) {
+        if (attr_span(alen, m->wire) > m->payload_len - pos) {
             *why = "attribute runs past the end of the message";
             return -1;
         }
-        pos += alen;
+        pos += attr_span(alen, m->wire);
     }
 
     // 1-3 left over: tolerate zero padding, reject anything else.
@@ -158,13 +175,14 @@ int sbcp_next_attr(const struct sbcp_msg *m, size_t *pos, struct sbcp_field *a)
 
     p    = m->payload + *pos;
     alen = get16(p + 2, m->wire);
-    if (alen < SBCP_ATTR_HDR_LEN || alen > m->payload_len - *pos)
+    if ((HDRLEN(m->wire) && alen < SBCP_ATTR_HDR_LEN) ||
+        attr_span(alen, m->wire) > m->payload_len - *pos)
         return 0;
 
     a->type = get16(p, m->wire);
-    a->len  = alen - SBCP_ATTR_HDR_LEN;
+    a->len  = attr_span(alen, m->wire) - SBCP_ATTR_HDR_LEN;
     a->val  = p + SBCP_ATTR_HDR_LEN;
-    *pos   += alen;
+    *pos   += attr_span(alen, m->wire);
     return 1;
 }
 
@@ -204,7 +222,7 @@ int sbcp_attr_count(const struct sbcp_field *a, enum sbcp_wire wire,
         *count = get16(a->val, wire);
         return 0;
     case 4:
-        if (wire == SBCP_WIRE_LEGACY)
+        if (LEGACY(wire))
             *count = (unsigned long)get16(a->val + 2, wire) << 16 |
                      get16(a->val, wire);
         else
@@ -257,7 +275,13 @@ int sbcp_reader_init(struct sbcp_reader *r, size_t cap)
         return -1;
     r->cap      = cap;
     r->since_ms = -1;
+    r->hdrlen   = -1;
     return 0;
+}
+
+void sbcp_reader_expect(struct sbcp_reader *r, enum sbcp_wire w)
+{
+    r->hdrlen = HDRLEN(w);
 }
 
 void sbcp_reader_free(struct sbcp_reader *r)
@@ -291,7 +315,8 @@ void sbcp_reader_commit(struct sbcp_reader *r, size_t n, int64_t now)
 {
     if (n > r->cap - r->end)
         n = r->cap - r->end;
-    r->end += n;
+    r->end    += n;
+    r->last_ms = now;
 
     // Still inside an oversized message: throw its bytes away as they come.
     if (r->skip > 0) {
@@ -305,6 +330,75 @@ void sbcp_reader_commit(struct sbcp_reader *r, size_t n, int64_t now)
             r->since_ms = -1;           // the next message starts fresh
     }
     touch(r, now);
+}
+
+// Attributes that exactly fill n bytes, with Length fields in either format.
+// In the HDRLEN format each must also carry at least one payload byte here.
+static int attrs_fill(const uint8_t *q, size_t n, enum sbcp_wire w)
+{
+    size_t pos = 0;
+
+    while (n - pos >= SBCP_ATTR_HDR_LEN) {
+        size_t alen = get16(q + pos + 2, w);
+
+        if ((HDRLEN(w) && alen <= SBCP_ATTR_HDR_LEN) || attr_span(alen, w) > n - pos)
+            return 0;
+        pos += attr_span(alen, w);
+    }
+    return pos == n;
+}
+
+static int starts_message(const uint8_t *q, enum sbcp_wire layout)
+{
+    enum sbcp_wire w;
+    unsigned       type;
+    size_t         len;
+
+    return sbcp_decode_header(q, &w, &type, &len) == 0 && w == layout &&
+           type >= TYPE_JOIN && type <= TYPE_IDLE;
+}
+
+// The first message tells how this peer counts Length: L bytes in all if it
+// counts the header, L + 4 if not. Returns 1 or 0, or -1 while it cannot tell
+// yet. After a whole L-byte message come the next message's header or nothing;
+// inside an (L + 4)-byte one come payload bytes, which never look like a header.
+static int guess_hdrlen(const struct sbcp_reader *r, size_t L, enum sbcp_wire layout,
+                        int64_t now)
+{
+    const uint8_t *p     = r->buf + r->start;
+    size_t         avail = r->end - r->start;
+    int            whole;
+
+    if (L < SBCP_HDR_LEN || L + SBCP_HDR_LEN > r->cap)
+        return 0;
+    if (avail < L)
+        return -1;
+    whole = attrs_fill(p + SBCP_HDR_LEN, L - SBCP_HDR_LEN,
+                       (enum sbcp_wire)(layout | SBCP_WIRE_HDRLEN));
+    if (avail >= L + SBCP_HDR_LEN) {
+        if (whole && starts_message(p + L, layout))
+            return 1;
+        if (attrs_fill(p + SBCP_HDR_LEN, L, layout))
+            return 0;
+        return whole;
+    }
+    if (!whole)
+        return -1;
+    if (avail > L)
+        return p[L] == p[0] ? 1 : -1;
+    return now - r->last_ms >= SBCP_GUESS_MS ? 1 : -1;
+}
+
+int sbcp_reader_guessing(const struct sbcp_reader *r)
+{
+    enum sbcp_wire wire;
+    unsigned       type;
+    size_t         L;
+
+    return r->hdrlen < 0 && r->skip == 0 && r->end - r->start >= SBCP_HDR_LEN &&
+           sbcp_decode_header(r->buf + r->start, &wire, &type, &L) == 0 &&
+           guess_hdrlen(r, L, wire, r->last_ms) < 0 &&
+           guess_hdrlen(r, L, wire, r->last_ms + SBCP_GUESS_MS) == 1;
 }
 
 enum sbcp_rd sbcp_reader_next(struct sbcp_reader *r, const uint8_t **frame,
@@ -328,12 +422,23 @@ enum sbcp_rd sbcp_reader_next(struct sbcp_reader *r, const uint8_t **frame,
         *why = "not an SBCP version 3 header; dropped the buffered bytes";
         return SBCP_RD_JUNK;
     }
-    if (flen < SBCP_HDR_LEN) {
+    if (r->hdrlen < 0) {
+        int g = guess_hdrlen(r, flen, wire, now);
+
+        if (g < 0) {
+            touch(r, now);
+            return SBCP_RD_MORE;
+        }
+        r->hdrlen = g;
+    }
+    if (r->hdrlen && flen < SBCP_HDR_LEN) {
         r->start    = r->end;
         r->since_ms = -1;
         *why = "Length field smaller than the header; dropped the buffered bytes";
         return SBCP_RD_JUNK;
     }
+    if (!r->hdrlen)
+        flen += SBCP_HDR_LEN;
 
     // Too big to be valid here, but correctly framed: skip exactly its bytes
     // so the message after it is still found.

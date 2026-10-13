@@ -18,7 +18,7 @@ implemented: IPv4/IPv6, Feature 1 (ACK, NAK, ONLINE, OFFLINE) and Feature 2
 
 ```sh
 make                 # builds ./server and ./client
-make test            # all tests: 41 server + 34 client cases, about 1.5 min
+make test            # all tests: 43 server + 34 client cases, about 1.5 min
 make test-server     # server cases only, about 25 s
 make test-client     # client cases only, about 75 s
 make test-quick      # all but the slow timing cases, about 30 s
@@ -53,7 +53,7 @@ treats the same way. Both programs also accept host names such as
 | JOIN / SEND / FWD | `src/client.c`, `src/server.c` | FWD carries Message then Username, as in the spec's attribute table |
 | Client: prompt, `select()` over stdin and socket, discard unknown messages | `src/client.c` | prompt `name> ` on a terminal; received chat lines print as `name: text` |
 | Server: IP/port/max from argv, FWD to all but sender, unique names, cleanup on unceremonious exit, discard unknown messages | `src/server.c` | |
-| Length checked against bytes received | `src/client.c`, `src/sbcp_codec.c` | both sides cut the TCP byte stream into messages by the Length field |
+| Length checked against bytes received | `src/client.c`, `src/sbcp_codec.c` | both sides cut the TCP byte stream into messages by the Length field, in the reference server's format (see Wire format) |
 | Bonus: IPv4 and IPv6 | `src/net.c`, `src/client.c` | `getaddrinfo()` with `AF_UNSPEC`; `::` is dual-stack |
 | Bonus Feature 1: ACK, NAK, ONLINE, OFFLINE | `src/server.c`, `src/client.c` | ACK count includes the new client, the name list excludes it |
 | Bonus Feature 2: IDLE | `src/client.c`, `src/server.c` | once per 10 s of not sending; relayed with the idle user's name |
@@ -70,9 +70,9 @@ treats the same way. Both programs also accept host names such as
 | `src/util.c`, `include/util.h` | Timestamped logging, strict number parsing, monotonic clock |
 | `docs/DESIGN.md` | Conceptual model and design decisions (the required design sketch) |
 | `docs/TEST_REPORT.md` | Test report: method, cases, screen captures |
-| `tests/test_sbcp.c` | Test suite in C: 41 server cases and 34 client cases, non-zero exit on failure |
+| `tests/test_sbcp.c` | Test suite in C: 43 server cases and 34 client cases, non-zero exit on failure |
 | `tests/demo.sh` | tmux scenarios for the screen captures (`./tests/demo.sh three`) |
-| `tests/sbcp_probe.c` | Joins a server in both byte layouts and reports which one it speaks |
+| `tests/sbcp_probe.c` | Joins a server in each message format and reports which ones it answers |
 
 ## Architecture
 
@@ -117,22 +117,26 @@ Key decisions (details in `docs/DESIGN.md`):
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| Vrsn = 3, 9 bits| Type, 7 bits| Length of the whole message   |
+| Vrsn = 3, 9 bits| Type, 7 bits| Length: bytes after the header|
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| Attribute Type                | Length of the whole attribute |
+| Attribute Type                | Length: payload bytes         |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| Attribute payload (Length - 4 bytes) ...                      |
+| Attribute payload (Length bytes) ...                          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-All fields are in network byte order. `JOIN alice` on the wire:
-`01 82 00 0d | 00 02 00 09 | 61 6c 69 63 65`. Strings carry no terminating
+All fields are in network byte order. Each Length counts the bytes after its
+own 4-byte header: the message Length is the size of all its attributes, an
+attribute Length the size of its payload. This is the format of the course's
+reference server (ecewkgsw05201.engr.tamu.edu:9000). `JOIN alice` on the wire:
+`01 82 00 09 | 00 02 00 05 | 61 6c 69 63 65`. Strings carry no terminating
 NUL; a trailing NUL from another implementation is accepted and stripped by
 the server.
 
-The server also understands peers that write a C bit-field struct straight
-from an x86 host (first byte `03` instead of `01`) and answers them in the
-same layout. This only matters for interoperability tests with other teams.
+The server also understands two other encodings and answers each client in
+its own: Length fields that also count the 4-byte header (the other reading
+of the handout, learnt from the client's first message), and a C bit-field
+struct written straight from an x86 host (first byte `03` instead of `01`).
 
 ## Robustness
 
@@ -148,10 +152,10 @@ signal, when it is refused or the server goes away.
 ## Testing
 
 `make test` runs `tests/test_sbcp` (C), which starts the real binaries and
-drives them over real sockets. The 41 server cases (U, A, B, C, D, F) use raw
+drives them over real sockets. The 43 server cases (U, A, B, C, D, F) use raw
 connections with hand-built messages: unit tests of the codec, the bonus
-features, byte-exact message checks, malformed input, and disconnect and
-resource-exhaustion cases. The 34 client cases (I) run the real client against
+features, byte-exact message checks in both Length formats, malformed input,
+and disconnect and resource-exhaustion cases. The 34 client cases (I) run the real client against
 the real server with raw sockets as the other members, or against a scripted
 fake server for exact bytes and malformed input: join, ACK in both forms,
 relays, NAKs, name reuse, messages arriving together or one byte at a time,
@@ -160,16 +164,20 @@ mid-send, argument errors, and the prompt on a pseudo-terminal.
 
 | Environment | Server cases | Client cases |
 |---|---|---|
-| Ubuntu 22.04, kernel 6.8, gcc 11.4, IPv6 | 41/41 | 34/34 |
-| Ubuntu 24.04, gcc 13.3 / clang 18 (no IPv6) | 41/41 | 33/33, IPv6 case skipped |
-| same, client built with AddressSanitizer + UndefinedBehaviorSanitizer | | 33/33, no reports |
+| Ubuntu 24.04, gcc 13.3 / clang 18 (no IPv6) | 43/43 | 33/33, IPv6 case skipped |
+| same, both programs built with AddressSanitizer + UndefinedBehaviorSanitizer | 43/43, no reports | 33/33, no reports |
 
 The method, the case list and the screen captures are in
 `docs/TEST_REPORT.md`.
 
 ## Interpretations and errata
 
-1. Both Length fields count their own 4-byte header.
+1. Each Length counts the bytes after its own 4-byte header (message Length
+   = all attributes, attribute Length = payload). The handout ("indicates the
+   length of the SBCP message/attribute") allows this or counting the header;
+   the course's reference server uses this one and drops a client whose
+   Length counts the header. Our server accepts both, learns a client's
+   format from its first message and answers in the same format.
 2. A NAKed client gets the reason, then the server closes the connection
    (after the NAK is flushed, so it is never lost to an RST). The client
    prints the reason and exits with status 1.
