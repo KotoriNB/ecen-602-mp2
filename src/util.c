@@ -1,4 +1,4 @@
-// util.c -- implementation of the helpers in util.h.
+// util.c: implementation of the helpers in util.h.
 
 #include "util.h"
 
@@ -28,7 +28,7 @@ static size_t bump(size_t off, int ret, size_t cap)
 // Zero-timeout select(): would a write to fd go through without blocking?
 static int writable_now(int fd)
 {
-    fd_set         wset;
+    fd_set wset;
     struct timeval tv = { 0, 0 };
 
     if (fd < 0 || fd >= FD_SETSIZE)
@@ -46,13 +46,13 @@ static void vlog(int fd, int with_errno, const char *fmt, va_list ap) PRINTF_LIK
 // paused terminal, and a failed write is ignored (SIGPIPE is ignored).
 static void vlog(int fd, int with_errno, const char *fmt, va_list ap)
 {
-    int         saved_errno = errno;
-    char        line[LOG_LINE_MAX];
-    char        stamp[32];
-    struct tm   tmv;
-    time_t      now = time(NULL);
-    size_t      off = 0;
-    ssize_t     ignored;
+    int saved_errno = errno;
+    char line[LOG_LINE_MAX];
+    char stamp[32];
+    struct tm tmv;
+    time_t now = time(NULL);
+    size_t off = 0;
+    ssize_t ignored;
 
     if (!writable_now(fd)) {
         errno = saved_errno;
@@ -67,13 +67,10 @@ static void vlog(int fd, int with_errno, const char *fmt, va_list ap)
     off = bump(off, snprintf(line, sizeof(line), "[%s] ", stamp), sizeof(line));
 
     if (off < sizeof(line) - 1)
-        off = bump(off, vsnprintf(line + off, sizeof(line) - off, fmt, ap),
-                   sizeof(line));
+        off = bump(off, vsnprintf(line + off, sizeof(line) - off, fmt, ap), sizeof(line));
 
     if (with_errno && off < sizeof(line) - 1)
-        off = bump(off, snprintf(line + off, sizeof(line) - off, ": %s",
-                                 strerror(saved_errno)),
-                   sizeof(line));
+        off = bump(off, snprintf(line + off, sizeof(line) - off, ": %s", strerror(saved_errno)), sizeof(line));
 
     line[off++] = '\n';
 
@@ -128,7 +125,7 @@ void die_msg(const char *fmt, ...)
 int parse_long(const char *s, long lo, long hi, long *out)
 {
     char *end;
-    long  v;
+    long v;
 
     if (s == NULL || *s == '\0')
         return -1;
@@ -155,8 +152,8 @@ int64_t now_ms(void)
 void sanitize(const void *in, size_t n, char *out, size_t outsz)
 {
     const unsigned char *p = in;
-    size_t               o = 0;
-    size_t               i;
+    size_t o = 0;
+    size_t i;
 
     if (outsz == 0)
         return;
@@ -182,7 +179,7 @@ void set_signal(int signo, void (*handler)(int), int flags)
 
     memset(&act, 0, sizeof(act));
     act.sa_handler = handler;
-    act.sa_flags   = flags;
+    act.sa_flags = flags;
     sigemptyset(&act.sa_mask);
 
     if (sigaction(signo, &act, NULL) < 0)

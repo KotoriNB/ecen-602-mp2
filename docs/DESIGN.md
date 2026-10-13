@@ -185,4 +185,6 @@ loop:
 | Restart while old connections are in TIME_WAIT | `SO_REUSEADDR` |
 | Signal between the flag check and `select()` | self-pipe wakes `select()` |
 | Username with terminal escape codes | server rejects control characters in names |
+| Message with terminal escape codes (e.g. another client's arrow keys) | client: shown as `^X` by `printable()`; typed escape codes dropped by `strip_controls()` |
+| Malformed message from a server (attribute missing, empty or too long) | client: `process_message()` discards it; a NAK still ends the client |
 | Spoofed sender | FWD always carries the name from the JOIN, never one from SEND |

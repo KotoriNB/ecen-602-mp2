@@ -34,8 +34,8 @@ _Screen captures: one per case, here._
 at `http://ecewkgsw05201.engr.tamu.edu:9002/`.
 
 ```sh
-./client kotori_a ecewkgsw05201.engr.tamu.edu 9000      # terminal 1
-./client kotori_b ecewkgsw05201.engr.tamu.edu 9000      # terminal 2
+./client kotori_a ecewkgsw05201.engr.tamu.edu 9000 # terminal 1
+./client kotori_b ecewkgsw05201.engr.tamu.edu 9000 # terminal 2
 ```
 
 | Step | Expected in the clients | Expected in the server log |
@@ -64,12 +64,15 @@ names every case.
   NAK reasons; clients that reset before, during and after JOIN, also while
   the server is writing to them (the SIGPIPE case); a client that never reads;
   running out of descriptors; IPv6; Length fields that count the header.
-- **Client, 35 cases**: the real client against the real server or a scripted
+- **Client, 38 cases**: the real client against the real server or a scripted
   server. ACK, NAK, FWD, ONLINE, OFFLINE and IDLE shown, also as the reference
-  server sends them; exact JOIN, SEND and IDLE bytes; IDLE after 10 s while
+  server sends them; an ACK with 120 names shown in full; malformed server
+  messages discarded; exact JOIN, SEND and IDLE bytes; IDLE after 10 s while
   others keep talking; long, UTF-8 and piped input; messages arriving together
-  or one byte at a time; IPv6; server shutdown and crash; bad arguments; the
-  prompt on a terminal.
+  or one byte at a time; terminal escape codes in received text shown as `^[`,
+  and arrow-key codes not sent; IPv6; server shutdown and crash; bad
+  arguments; on a real terminal: the prompt, a message arriving while a line
+  is half typed, Ctrl-Z/fg, window resize, Ctrl-D after a half line.
 
 | Machine | Result |
 |---|---|

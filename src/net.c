@@ -1,4 +1,4 @@
-// net.c -- implementation of net.h.
+// net.c: implementation of net.h.
 
 #include "net.h"
 #include "util.h"
@@ -13,16 +13,16 @@
 #include <sys/select.h>
 #include <unistd.h>
 
-int net_listen(const char *host, const char *port, int backlog,
-               int *fds, int max, char *err, size_t errlen)
+int net_listen(const char *host, const char *port, int backlog, int *fds, int max, char *err, size_t errlen)
 {
-    struct addrinfo  hints, *res, *ai;
-    int              n_addr = 0, n = 0, rc;
+    struct addrinfo hints, *res, *ai;
+    int n_addr = 0, n = 0, rc;
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;          // IPv4 or IPv6, whatever host is
+    // IPv4 or IPv6, whatever host is
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags    = AI_PASSIVE | AI_NUMERICSERV;
+    hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV;
 
     if ((rc = getaddrinfo(host, port, &hints, &res)) != 0) {
         snprintf(err, errlen, "cannot resolve \"%s\": %s", host, gai_strerror(rc));
@@ -35,8 +35,8 @@ int net_listen(const char *host, const char *port, int backlog,
 
     for (ai = res; ai != NULL && n < max; ai = ai->ai_next) {
         char addr[NET_ADDRSTRLEN];
-        int  one = 1;
-        int  fd;
+        int one = 1;
+        int fd;
 
         net_addr_str(ai->ai_addr, ai->ai_addrlen, addr, sizeof(addr));
 
@@ -55,8 +55,7 @@ int net_listen(const char *host, const char *port, int backlog,
         if (ai->ai_family == AF_INET6) {
             int v6only = n_addr > 1;
 
-            if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only,
-                           sizeof(v6only)) < 0)
+            if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0)
                 log_err("setsockopt(IPV6_V6ONLY) on %s", addr);
         }
 
@@ -79,11 +78,10 @@ int net_listen(const char *host, const char *port, int backlog,
 
 // Non-blocking connect() bounded by timeout_ms, so a wrong or firewalled
 // address fails in seconds instead of the kernel's two minutes of SYN retries.
-static int connect_timeout(int fd, const struct sockaddr *sa, socklen_t len,
-                           int timeout_ms)
+static int connect_timeout(int fd, const struct sockaddr *sa, socklen_t len, int timeout_ms)
 {
-    int64_t   deadline = now_ms() + timeout_ms;
-    int       soerr = 0;
+    int64_t deadline = now_ms() + timeout_ms;
+    int soerr = 0;
     socklen_t elen = sizeof(soerr);
 
     if (net_set_nonblock(fd, 1) < 0)
@@ -94,10 +92,10 @@ static int connect_timeout(int fd, const struct sockaddr *sa, socklen_t len,
             return -1;
 
         for (;;) {
-            fd_set         wset;
+            fd_set wset;
             struct timeval tv;
-            int64_t        left = deadline - now_ms();
-            int            nready;
+            int64_t left = deadline - now_ms();
+            int nready;
 
             if (left <= 0) {
                 errno = ETIMEDOUT;
@@ -109,7 +107,7 @@ static int connect_timeout(int fd, const struct sockaddr *sa, socklen_t len,
             }
             FD_ZERO(&wset);
             FD_SET(fd, &wset);
-            tv.tv_sec  = (time_t)(left / 1000);
+            tv.tv_sec = (time_t)(left / 1000);
             tv.tv_usec = (suseconds_t)(left % 1000) * 1000;
 
             nready = select(fd + 1, NULL, &wset, NULL, &tv);
@@ -134,16 +132,16 @@ static int connect_timeout(int fd, const struct sockaddr *sa, socklen_t len,
     return net_set_nonblock(fd, 0);
 }
 
-int net_connect(const char *host, const char *port, int timeout_ms,
-                char *peer, size_t peerlen, char *err, size_t errlen)
+int net_connect(const char *host, const char *port, int timeout_ms, char *peer, size_t peerlen, char *err,
+    size_t errlen)
 {
-    struct addrinfo  hints, *res, *ai;
-    int              fd = -1, saved = ENOENT, rc;
+    struct addrinfo hints, *res, *ai;
+    int fd = -1, saved = ENOENT, rc;
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags    = AI_NUMERICSERV;
+    hints.ai_flags = AI_NUMERICSERV;
 
     if ((rc = getaddrinfo(host, port, &hints, &res)) != 0) {
         snprintf(err, errlen, "cannot resolve \"%s\": %s", host, gai_strerror(rc));
@@ -177,11 +175,10 @@ int net_connect(const char *host, const char *port, int timeout_ms,
     return fd;
 }
 
-void net_addr_str(const struct sockaddr *sa, socklen_t len,
-                  char *out, size_t outlen)
+void net_addr_str(const struct sockaddr *sa, socklen_t len, char *out, size_t outlen)
 {
-    char               host[1025];
-    char               serv[32];
+    char host[1025];
+    char serv[32];
     struct sockaddr_in v4;
 
     // Dual-stack sockets report IPv4 peers as ::ffff:a.b.c.d; show a.b.c.d.
@@ -191,15 +188,14 @@ void net_addr_str(const struct sockaddr *sa, socklen_t len,
         if (IN6_IS_ADDR_V4MAPPED(&s6->sin6_addr)) {
             memset(&v4, 0, sizeof(v4));
             v4.sin_family = AF_INET;
-            v4.sin_port   = s6->sin6_port;
+            v4.sin_port = s6->sin6_port;
             memcpy(&v4.sin_addr, &s6->sin6_addr.s6_addr[12], 4);
-            sa  = (const struct sockaddr *)&v4;
+            sa = (const struct sockaddr *)&v4;
             len = sizeof(v4);
         }
     }
 
-    if (getnameinfo(sa, len, host, sizeof(host), serv, sizeof(serv),
-                    NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+    if (getnameinfo(sa, len, host, sizeof(host), serv, sizeof(serv), NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
         snprintf(out, outlen, "(unknown address)");
         return;
     }
@@ -213,7 +209,7 @@ void net_addr_str(const struct sockaddr *sa, socklen_t len,
 void net_sock_str(int fd, char *out, size_t outlen)
 {
     struct sockaddr_storage ss;
-    socklen_t               len = sizeof(ss);
+    socklen_t len = sizeof(ss);
 
     if (getsockname(fd, (struct sockaddr *)&ss, &len) < 0)
         snprintf(out, outlen, "(unknown address)");
@@ -224,7 +220,7 @@ void net_sock_str(int fd, char *out, size_t outlen)
 void net_peer_str(int fd, char *out, size_t outlen)
 {
     struct sockaddr_storage ss;
-    socklen_t               len = sizeof(ss);
+    socklen_t len = sizeof(ss);
 
     if (getpeername(fd, (struct sockaddr *)&ss, &len) < 0)
         snprintf(out, outlen, "(unknown address)");

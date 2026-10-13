@@ -1,4 +1,4 @@
-// util.h -- logging, strict argument parsing, clocks and display helpers,
+// util.h: logging, strict argument parsing, clocks and display helpers,
 // shared by the server and the client.
 
 #ifndef UTIL_H
@@ -14,12 +14,14 @@
 #define PRINTF_LIKE(fmt_idx, arg_idx)
 #endif
 
-// Timestamped, one write() per line.
-void log_info(const char *fmt, ...) PRINTF_LIKE(1, 2);  // -> stdout
-void log_err(const char *fmt, ...) PRINTF_LIKE(1, 2);   // -> stderr, appends strerror(errno)
-void log_msg(const char *fmt, ...) PRINTF_LIKE(1, 2);   // -> stderr, no errno
-void die_sys(const char *fmt, ...) PRINTF_LIKE(1, 2);   // log_err, then exit(1)
-void die_msg(const char *fmt, ...) PRINTF_LIKE(1, 2);   // log_msg, then exit(1)
+// Timestamped logging, one write() per line: log_info to stdout, log_err to
+// stderr with strerror(errno) appended, log_msg to stderr without it.
+// die_sys and die_msg log like log_err and log_msg, then exit(1).
+void log_info(const char *fmt, ...) PRINTF_LIKE(1, 2);
+void log_err(const char *fmt, ...) PRINTF_LIKE(1, 2);
+void log_msg(const char *fmt, ...) PRINTF_LIKE(1, 2);
+void die_sys(const char *fmt, ...) PRINTF_LIKE(1, 2);
+void die_msg(const char *fmt, ...) PRINTF_LIKE(1, 2);
 
 // Whole-string decimal conversion in [lo, hi]. Returns 0, or -1 for junk,
 // trailing characters, overflow or a value out of range.
@@ -33,7 +35,7 @@ int64_t now_ms(void);
 // Bytes >= 0x80 pass through, so UTF-8 still displays. Always NUL-terminates.
 void sanitize(const void *in, size_t n, char *out, size_t outsz);
 
-// Installs handler for signo with sigaction(); SIG_IGN / SIG_DFL also work.
+// Installs handler for signo with sigaction(); SIG_IGN and SIG_DFL also work.
 void set_signal(int signo, void (*handler)(int), int flags);
 
 #endif // UTIL_H

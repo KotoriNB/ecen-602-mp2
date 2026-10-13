@@ -1,4 +1,4 @@
-// net.h -- protocol-independent socket helpers (IPv4 and IPv6 through
+// net.h: protocol-independent socket helpers (IPv4 and IPv6 through
 // getaddrinfo), shared by the server and the client.
 
 #ifndef NET_H
@@ -15,17 +15,15 @@
 // so "localhost" covers both ::1 and 127.0.0.1. "::" alone is dual-stack.
 // Returns the number of listening sockets; 0 means none could be opened and
 // err holds the reason.
-int net_listen(const char *host, const char *port, int backlog,
-               int *fds, int max, char *err, size_t errlen);
+int net_listen(const char *host, const char *port, int backlog, int *fds, int max, char *err, size_t errlen);
 
 // Tries each address of host in turn, giving each timeout_ms to connect.
 // Returns a blocking connected socket, or -1 with the reason in err.
-int net_connect(const char *host, const char *port, int timeout_ms,
-                char *peer, size_t peerlen, char *err, size_t errlen);
+int net_connect(const char *host, const char *port, int timeout_ms, char *peer, size_t peerlen, char *err,
+    size_t errlen);
 
 // "1.2.3.4:5" or "[::1]:5"; IPv4-mapped IPv6 addresses print as IPv4.
-void net_addr_str(const struct sockaddr *sa, socklen_t len,
-                  char *out, size_t outlen);
+void net_addr_str(const struct sockaddr *sa, socklen_t len, char *out, size_t outlen);
 
 // Local and remote address of a connected socket, formatted as above.
 void net_sock_str(int fd, char *out, size_t outlen);

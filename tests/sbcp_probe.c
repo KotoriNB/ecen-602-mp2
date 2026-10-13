@@ -1,4 +1,4 @@
-// tests/sbcp_probe.c -- which message format does an SBCP server speak?
+// tests/sbcp_probe.c: which message format does an SBCP server speak?
 //
 // Joins the server once per format: the campus format (network byte order,
 // Length fields that leave out their own header, as ./client sends), Length
@@ -21,14 +21,14 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define WAIT_MS  3000
+#define WAIT_MS 3000
 #define QUIET_MS 500
 
 static const struct {
     enum sbcp_wire wire;
-    const char    *label;
+    const char *label;
 } formats[] = {
-    { SBCP_WIRE_NET,    "campus format (Length leaves out the header)" },
+    { SBCP_WIRE_NET, "campus format (Length leaves out the header)" },
     { SBCP_WIRE_HDRLEN, "Length counts the header" },
     { SBCP_WIRE_LEGACY, "little-endian bit-field layout" },
 };
@@ -48,8 +48,8 @@ static void hexdump(const char *label, const uint8_t *p, size_t n)
 static void describe(const struct sbcp_msg *m)
 {
     struct sbcp_field a;
-    size_t            pos = 0;
-    char              text[256];
+    size_t pos = 0;
+    char text[256];
 
     printf("    = %s", sbcp_type_name(m->type));
     while (sbcp_next_attr(m, &pos, &a)) {
@@ -58,10 +58,16 @@ static void describe(const struct sbcp_msg *m)
         if (a.type == ATTR_CLIENT_COUNT && sbcp_attr_count(&a, m->wire, &count) == 0) {
             printf(", count %lu", count);
         } else {
+            const char *kind = "attr";
+
+            if (a.type == ATTR_USERNAME)
+                kind = "user";
+            else if (a.type == ATTR_REASON)
+                kind = "reason";
+            else if (a.type == ATTR_MESSAGE)
+                kind = "message";
             sanitize(a.val, a.len < 64 ? a.len : 64, text, sizeof(text));
-            printf(", %s \"%s\"", a.type == ATTR_USERNAME ? "user" :
-                                  a.type == ATTR_REASON ? "reason" :
-                                  a.type == ATTR_MESSAGE ? "message" : "attr", text);
+            printf(", %s \"%s\"", kind, text);
         }
     }
     printf("\n");
@@ -71,9 +77,9 @@ static void describe(const struct sbcp_msg *m)
 static int parse_reply(const uint8_t *in, size_t got, struct sbcp_msg *m)
 {
     enum sbcp_wire w;
-    unsigned       type;
-    size_t         len;
-    const char    *why;
+    unsigned type;
+    size_t len;
+    const char *why;
 
     if (got < SBCP_HDR_LEN || sbcp_decode_header(in, &w, &type, &len) < 0)
         return -1;
@@ -87,13 +93,13 @@ static int parse_reply(const uint8_t *in, size_t got, struct sbcp_msg *m)
 // Returns 1 if the server answered with ACK or NAK in the format it was sent.
 static int probe(const char *host, const char *port, const char *name, int i)
 {
-    uint8_t             out[64], in[4096];
+    uint8_t out[64], in[4096];
     struct sbcp_builder b;
-    struct sbcp_msg     m;
-    char                peer[NET_ADDRSTRLEN], err[256];
-    size_t              n, got = 0;
-    int                 fd;
-    int64_t             deadline, quiet = 0;
+    struct sbcp_msg m;
+    char peer[NET_ADDRSTRLEN], err[256];
+    size_t n, got = 0;
+    int fd;
+    int64_t deadline, quiet = 0;
 
     printf("%s:\n", formats[i].label);
     if ((fd = net_connect(host, port, 5000, peer, sizeof(peer), err, sizeof(err))) < 0) {
@@ -114,16 +120,16 @@ static int probe(const char *host, const char *port, const char *name, int i)
     // Everything until the server goes quiet, hangs up, or WAIT_MS passes.
     deadline = now_ms() + WAIT_MS;
     while (got < sizeof(in)) {
-        fd_set         rset;
+        fd_set rset;
         struct timeval tv;
-        int64_t        left = (quiet ? quiet : deadline) - now_ms();
-        ssize_t        k;
+        int64_t left = (quiet ? quiet : deadline) - now_ms();
+        ssize_t k;
 
         if (left <= 0)
             break;
         FD_ZERO(&rset);
         FD_SET(fd, &rset);
-        tv.tv_sec  = (time_t)(left / 1000);
+        tv.tv_sec = (time_t)(left / 1000);
         tv.tv_usec = (suseconds_t)(left % 1000) * 1000;
         if (select(fd + 1, &rset, NULL, NULL, &tv) <= 0)
             break;
@@ -132,7 +138,7 @@ static int probe(const char *host, const char *port, const char *name, int i)
             printf("    server closed the connection%s\n", k < 0 ? " (reset)" : "");
             break;
         }
-        got  += (size_t)k;
+        got += (size_t)k;
         quiet = now_ms() + QUIET_MS;
     }
     close(fd);
@@ -155,8 +161,8 @@ static int probe(const char *host, const char *port, const char *name, int i)
 
 int main(int argc, char **argv)
 {
-    char   name[MAX_USERNAME_LEN + 1];
-    int    ok[3], i;
+    char name[MAX_USERNAME_LEN + 1];
+    int ok[3], i;
 
     if (argc < 3 || argc > 4) {
         fprintf(stderr, "usage: %s <host> <port> [username]\n", argv[0]);
@@ -177,14 +183,14 @@ int main(int argc, char **argv)
     printf("Verdict: ");
     if (ok[0])
         printf("the server speaks the campus format%s; ./client works with it as is.\n",
-               ok[1] || ok[2] ? " (and answers the other formats too)" : "");
+            ok[1] || ok[2] ? " (and answers the other formats too)" : "");
     else if (ok[1])
         printf("the server's Length fields count the header. ./server understands such\n"
-               "         clients, but ./client sends the campus format.\n");
+            "         clients, but ./client sends the campus format.\n");
     else if (ok[2])
         printf("the server speaks the little-endian bit-field layout only.\n");
     else
         printf("no SBCP answer in any format; check host and port, or compare the\n"
-               "         hex above with the message format in the handout.\n");
+            "         hex above with the message format in the handout.\n");
     return ok[0] || ok[1] || ok[2] ? 0 : 1;
 }

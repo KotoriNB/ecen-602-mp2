@@ -15,20 +15,20 @@
 #include "sbcp.h"
 
 #define BUFFER_SIZE 1024
-#define LINE_BUF_SIZE 4096      /* the longest line a terminal passes on in one read */
+#define LINE_BUF_SIZE 4096 // the longest line a terminal passes on in one read
 #define IDLE_TIMEOUT_SEC 10
-#define RECV_BUF_SIZE (65535 + 4)  /* any SBCP message fits: 16-bit Length plus the header */
-#define PARTIAL_TIMEOUT_MS 3000 /* an unfinished message is discarded after this */
+#define RECV_BUF_SIZE (65535 + 4) // any SBCP message fits: 16-bit Length plus the header
+#define PARTIAL_TIMEOUT_MS 3000 // an unfinished message is discarded after this
 
-/* TCP is a byte stream: bytes from the server that do not form a whole message yet */
+// TCP is a byte stream: bytes from the server that do not form a whole message yet
 static uint8_t recv_buf[RECV_BUF_SIZE];
 static size_t recv_len;
-static long long partial_since = -1;    /* when the unfinished message began, -1 if none */
+static long long partial_since = -1; // when the unfinished message began, -1 if none
 
-static int show_prompt;                 /* stdin and stdout are terminals */
+static int show_prompt; // stdin and stdout are terminals
 static const char *my_name;
 
-/* Typed bytes whose '\n' has not arrived yet */
+// Typed bytes whose '\n' has not arrived yet
 static char line_buf[LINE_BUF_SIZE];
 static size_t line_len;
 
@@ -45,11 +45,11 @@ static void prompt(void) {
     }
 }
 
-/* Length fields count the bytes after their own 4-byte header, as the course
- * server does: the message Length covers the attributes, an attribute Length
- * its payload. */
+// Length fields count the bytes after their own 4-byte header, as the course
+// server does: the message Length covers the attributes, an attribute Length
+// its payload.
 
-/* Helper function to pack a JOIN message */
+// Helper function to pack a JOIN message
 static int pack_join(const char *username, uint8_t *buf, size_t buf_size) {
     size_t user_len = strlen(username);
     if (user_len < 1 || user_len > MAX_USERNAME_LEN) {
@@ -63,12 +63,12 @@ static int pack_join(const char *username, uint8_t *buf, size_t buf_size) {
         return -1;
     }
 
-    /* 1. Header */
+    // 1. Header
     struct sbcp_header *hdr = (struct sbcp_header *)buf;
     hdr->vrsn_type = htons(MAKE_VRSN_TYPE(SBCP_VERSION, TYPE_JOIN));
     hdr->length = htons(body_len);
 
-    /* 2. Username Attribute */
+    // 2. Username Attribute
     struct sbcp_attr *attr = (struct sbcp_attr *)(buf + sizeof(struct sbcp_header));
     attr->type = htons(ATTR_USERNAME);
     attr->length = htons(user_len);
@@ -77,7 +77,7 @@ static int pack_join(const char *username, uint8_t *buf, size_t buf_size) {
     return (int)total_len;
 }
 
-/* Helper function to pack a SEND message */
+// Helper function to pack a SEND message
 static int pack_send(const char *msg_text, size_t text_len, uint8_t *buf, size_t buf_size) {
     if (text_len < 1 || text_len > MAX_MESSAGE_LEN) {
         return -1;
@@ -90,12 +90,12 @@ static int pack_send(const char *msg_text, size_t text_len, uint8_t *buf, size_t
         return -1;
     }
 
-    /* 1. Header */
+    // 1. Header
     struct sbcp_header *hdr = (struct sbcp_header *)buf;
     hdr->vrsn_type = htons(MAKE_VRSN_TYPE(SBCP_VERSION, TYPE_SEND));
     hdr->length = htons(body_len);
 
-    /* 2. Message Attribute */
+    // 2. Message Attribute
     struct sbcp_attr *attr = (struct sbcp_attr *)(buf + sizeof(struct sbcp_header));
     attr->type = htons(ATTR_MESSAGE);
     attr->length = htons(text_len);
@@ -104,7 +104,7 @@ static int pack_send(const char *msg_text, size_t text_len, uint8_t *buf, size_t
     return (int)total_len;
 }
 
-/* Helper function to pack an IDLE message (no attributes) */
+// Helper function to pack an IDLE message (no attributes)
 static int pack_idle(uint8_t *buf, size_t buf_size) {
     uint16_t total_len = sizeof(struct sbcp_header);
     if (total_len > buf_size) {
@@ -118,7 +118,7 @@ static int pack_idle(uint8_t *buf, size_t buf_size) {
     return (int)total_len;
 }
 
-/* send() until every byte is out; returns 0, or -1 with errno set */
+// send() until every byte is out; returns 0, or -1 with errno set
 static int send_all(int sockfd, const uint8_t *buf, size_t len) {
     while (len > 0) {
         ssize_t n = send(sockfd, buf, len, 0);
@@ -134,21 +134,60 @@ static int send_all(int sockfd, const uint8_t *buf, size_t len) {
     return 0;
 }
 
-/* Send one typed line as SEND messages of at most MAX_MESSAGE_LEN bytes each.
- * Returns 1 if something was sent, 0 for an empty line, -1 on error. */
-static int send_text(int sockfd, const char *text, size_t len) {
+// Text from the network with control characters written as ^X, so a message
+// can never move the cursor or clear the screen
+static const char *printable(const char *s, char *out, size_t out_size) {
+    size_t n = 0;
+    for (; *s != '\0' && n + 3 < out_size; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '\t' || (c >= 0x20 && c != 0x7F)) {
+            out[n++] = (char)c;
+        } else {
+            out[n++] = '^';
+            out[n++] = (char)(c == 0x7F ? '?' : c + 0x40);
+        }
+    }
+    out[n] = '\0';
+    return out;
+}
+
+// Copy a typed line without the escape sequences that arrow and other special
+// keys produce, or any other control character (tabs stay); returns the length
+static size_t strip_controls(const char *in, size_t len, char *out) {
+    size_t i = 0, n = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)in[i++];
+        if (c == 0x1B) {
+            if (i < len && (in[i] == '[' || in[i] == 'O')) {
+                char kind = in[i++];
+                while (kind == '[' && i < len && (unsigned char)in[i] >= 0x20 && (unsigned char)in[i] <= 0x3F) {
+                    i++;
+                }
+                if (i < len && (unsigned char)in[i] >= 0x40 && (unsigned char)in[i] <= 0x7E) {
+                    i++;
+                }
+            }
+        } else if (c == '\t' || (c >= 0x20 && c != 0x7F)) {
+            out[n++] = (char)c;
+        }
+    }
+    return n;
+}
+
+// Send one typed line as SEND messages of at most MAX_MESSAGE_LEN bytes each.
+// Returns 1 if something was sent, 0 for an empty line, -1 on error.
+static int send_text(int sockfd, const char *line, size_t line_size) {
+    static char clean[LINE_BUF_SIZE];
     uint8_t send_buf[BUFFER_SIZE];
     int sent = 0;
-
-    if (len > 0 && text[len - 1] == '\r') {
-        len--;
-    }
+    size_t len = strip_controls(line, line_size, clean);
+    const char *text = clean;
 
     while (len > 0) {
         size_t chunk = len;
         if (chunk > MAX_MESSAGE_LEN) {
             chunk = MAX_MESSAGE_LEN;
-            /* never cut a UTF-8 character in half */
+            // never cut a UTF-8 character in half
             while (chunk > MAX_MESSAGE_LEN - 3 && ((unsigned char)text[chunk] & 0xC0) == 0x80) {
                 chunk--;
             }
@@ -166,55 +205,83 @@ static int send_text(int sockfd, const char *text, size_t len) {
     return sent;
 }
 
-/* Parse and handle one complete message from the server */
+// A text attribute of 1..max bytes (trailing NULs from other implementations
+// dropped first), copied to out; 0 if it is empty or too long
+static int get_text(const char *p, size_t len, char *out, size_t max) {
+    while (len > 0 && p[len - 1] == '\0') {
+        len--;
+    }
+    if (len < 1 || len > max) {
+        return 0;
+    }
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return 1;
+}
+
+// Print every valid Username in an ACK, however many: no fixed-size list
+static void print_users(const uint8_t *msg, size_t total_len) {
+    const char *sep = "[Server] Active users: ";
+    char name[2 * MAX_USERNAME_LEN + 1];
+    size_t offset = sizeof(struct sbcp_header);
+
+    while (offset + sizeof(struct sbcp_attr) <= total_len) {
+        const struct sbcp_attr *attr = (const struct sbcp_attr *)(msg + offset);
+        size_t payload_len = ntohs(attr->length);
+        char user[MAX_USERNAME_LEN + 1];
+
+        if (offset + sizeof(struct sbcp_attr) + payload_len > total_len) {
+            break;
+        }
+        if (ntohs(attr->type) == ATTR_USERNAME && get_text(attr->payload, payload_len, user, MAX_USERNAME_LEN)) {
+            printf("%s%s", sep, printable(user, name, sizeof(name)));
+            sep = ", ";
+        }
+        offset += sizeof(struct sbcp_attr) + payload_len;
+    }
+    printf("\n");
+}
+
+// Parse and handle one complete message from the server. A message that is
+// not understood (a required attribute missing or invalid) is discarded.
 static int process_message(const uint8_t *msg, size_t total_len) {
     const struct sbcp_header *hdr = (const struct sbcp_header *)msg;
     uint16_t type = GET_TYPE(ntohs(hdr->vrsn_type));
-
-    /* Parse SBCP Attributes */
-    size_t offset = sizeof(struct sbcp_header);
-    char username_buf[MAX_USERNAME_LEN + 1];
-    char message_buf[MAX_MESSAGE_LEN + 1];
-    char reason_buf[MAX_REASON_LEN + 1];
-    char user_list_buf[BUFFER_SIZE];
+    char username_buf[MAX_USERNAME_LEN + 1] = "";
+    char message_buf[MAX_MESSAGE_LEN + 1] = "";
+    char reason_buf[MAX_REASON_LEN + 1] = "";
+    char name[2 * MAX_USERNAME_LEN + 1];
+    char text[2 * MAX_MESSAGE_LEN + 1];
+    int has_user = 0, has_message = 0, has_reason = 0, has_count = 0, bad = 0;
     unsigned int client_count = 0;
-    int has_count = 0;
+    size_t offset;
 
-    memset(username_buf, 0, sizeof(username_buf));
-    memset(message_buf, 0, sizeof(message_buf));
-    memset(reason_buf, 0, sizeof(reason_buf));
-    memset(user_list_buf, 0, sizeof(user_list_buf));
-
-    while (offset < total_len) {
-        if (offset + sizeof(struct sbcp_attr) > total_len) {
-            break;
-        }
-
+    // Parse SBCP Attributes; the first of each kind counts, unknown kinds are skipped
+    for (offset = sizeof(struct sbcp_header); offset + sizeof(struct sbcp_attr) <= total_len;) {
         const struct sbcp_attr *attr = (const struct sbcp_attr *)(msg + offset);
         uint16_t attr_type = ntohs(attr->type);
         size_t payload_len = ntohs(attr->length);
+        char user[MAX_USERNAME_LEN + 1];
 
         if (offset + sizeof(struct sbcp_attr) + payload_len > total_len) {
+            bad = 1;
             break;
         }
 
         switch (attr_type) {
             case ATTR_REASON:
-                if (payload_len <= MAX_REASON_LEN) {
-                    memcpy(reason_buf, attr->payload, payload_len);
-                    reason_buf[payload_len] = '\0';
+                if (!has_reason) {
+                    has_reason = get_text(attr->payload, payload_len, reason_buf, MAX_REASON_LEN);
+                    bad |= !has_reason;
                 }
                 break;
 
             case ATTR_USERNAME:
-                if (payload_len <= MAX_USERNAME_LEN) {
-                    memcpy(username_buf, attr->payload, payload_len);
-                    username_buf[payload_len] = '\0';
-
-                    if (strlen(user_list_buf) > 0) {
-                        strncat(user_list_buf, ", ", sizeof(user_list_buf) - strlen(user_list_buf) - 1);
-                    }
-                    strncat(user_list_buf, username_buf, sizeof(user_list_buf) - strlen(user_list_buf) - 1);
+                if (!get_text(attr->payload, payload_len, user, MAX_USERNAME_LEN)) {
+                    bad = 1;
+                } else if (!has_user) {
+                    memcpy(username_buf, user, sizeof(user));
+                    has_user = 1;
                 }
                 break;
 
@@ -232,13 +299,15 @@ static int process_message(const uint8_t *msg, size_t total_len) {
                     memcpy(&count, attr->payload, sizeof(count));
                     client_count = ntohl(count);
                     has_count = 1;
+                } else {
+                    bad = 1;
                 }
                 break;
 
             case ATTR_MESSAGE:
-                if (payload_len <= MAX_MESSAGE_LEN) {
-                    memcpy(message_buf, attr->payload, payload_len);
-                    message_buf[payload_len] = '\0';
+                if (!has_message) {
+                    has_message = get_text(attr->payload, payload_len, message_buf, MAX_MESSAGE_LEN);
+                    bad |= !has_message;
                 }
                 break;
 
@@ -249,43 +318,58 @@ static int process_message(const uint8_t *msg, size_t total_len) {
         offset += sizeof(struct sbcp_attr) + payload_len;
     }
 
-    /* Process based on SBCP type; on a terminal, a notice replaces the prompt line */
+    // Not understood: a type a server does not send, or a required attribute missing or invalid.
+    // ACK and NAK are always shown (a NAK still means the JOIN was refused).
+    int needs_user = (type == TYPE_FWD || type == TYPE_ONLINE || type == TYPE_OFFLINE || type == TYPE_IDLE);
+    if (!needs_user && type != TYPE_ACK && type != TYPE_NAK) {
+        return 0;
+    }
+    if (needs_user && (bad || !has_user || (type == TYPE_FWD && !has_message))) {
+        return 0;
+    }
+
+    // Process based on SBCP type; on a terminal, a notice replaces the prompt line
     if (show_prompt) {
         printf("\r\033[K");
     }
     switch (type) {
         case TYPE_FWD:
-            printf("%s: %s\n", username_buf, message_buf);
+            printf("%s: %s\n", printable(username_buf, name, sizeof(name)), printable(message_buf, text, sizeof(text)));
             break;
 
         case TYPE_ACK:
             if (has_count) {
                 printf("[Server] Joined successfully. Client count: %u\n", client_count);
-                if (strlen(user_list_buf) > 0) {
-                    printf("[Server] Active users: %s\n", user_list_buf);
-                }
-            } else if (strlen(message_buf) > 0) {
-                /* the ACK may carry the count and the names as one string */
-                printf("[Server] Joined successfully. %s\n", message_buf);
+            } else if (has_message) {
+                // the ACK may carry the count and the names as one string
+                printf("[Server] Joined successfully. %s\n", printable(message_buf, text, sizeof(text)));
             } else {
                 printf("[Server] Joined successfully.\n");
+            }
+            if (has_count && has_user) {
+                print_users(msg, total_len);
             }
             break;
 
         case TYPE_NAK:
-            printf("[Server Error] Join rejected. Reason: %s\n", reason_buf);
+            if (has_reason) {
+                printf("[Server Error] Join rejected. Reason: %s\n", printable(reason_buf, text, sizeof(text)));
+            } else {
+                printf("[Server Error] Join rejected.\n");
+            }
+            fflush(stdout);
             return -1;
 
         case TYPE_ONLINE:
-            printf("[Server] User <%s> is online.\n", username_buf);
+            printf("[Server] User <%s> is online.\n", printable(username_buf, name, sizeof(name)));
             break;
 
         case TYPE_OFFLINE:
-            printf("[Server] User <%s> is offline.\n", username_buf);
+            printf("[Server] User <%s> is offline.\n", printable(username_buf, name, sizeof(name)));
             break;
 
         case TYPE_IDLE:
-            printf("%s is idle\n", username_buf);
+            printf("%s is idle\n", printable(username_buf, name, sizeof(name)));
             break;
 
         default:
@@ -297,8 +381,8 @@ static int process_message(const uint8_t *msg, size_t total_len) {
     return 0;
 }
 
-/* Read from the server and handle every complete message received so far:
- * one recv() can hold part of a message, or several messages. */
+// Read from the server and handle every complete message received so far:
+// one recv() can hold part of a message, or several messages.
 static int handle_server_message(int sockfd) {
     ssize_t bytes_read = recv(sockfd, recv_buf + recv_len, sizeof(recv_buf) - recv_len, 0);
 
@@ -320,13 +404,14 @@ static int handle_server_message(int sockfd) {
         uint16_t version = GET_VERSION(ntohs(hdr.vrsn_type));
         size_t total_len = sizeof(struct sbcp_header) + ntohs(hdr.length);
 
-        /* Not an SBCP header: the next message boundary is lost, so drop what we have */
+        // Not an SBCP header: the next message boundary is lost, so drop what we have
         if (version != SBCP_VERSION) {
             offset = recv_len;
             break;
         }
         if (recv_len - offset < total_len) {
-            break;      /* the rest of this message has not arrived yet */
+            // the rest of this message has not arrived yet
+            break;
         }
 
         rc = process_message(recv_buf + offset, total_len);
@@ -367,10 +452,10 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    /* A dead server must show up as a send() error, not kill us with SIGPIPE */
+    // A dead server must show up as a send() error, not kill us with SIGPIPE
     signal(SIGPIPE, SIG_IGN);
 
-    /* IPv4 or IPv6: try each address the server_ip argument resolves to */
+    // IPv4 or IPv6: try each address the server_ip argument resolves to
     struct addrinfo hints, *res, *ai;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -406,7 +491,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    /* Send initial JOIN message */
+    // Send initial JOIN message
     uint8_t send_buf[BUFFER_SIZE];
     int join_len = pack_join(username, send_buf, sizeof(send_buf));
     if (join_len < 0) {
@@ -425,19 +510,19 @@ int main(int argc, char *argv[]) {
     int max_fd = (sockfd > STDIN_FILENO) ? sockfd : STDIN_FILENO;
     int is_idle = 0;
     int status = EXIT_SUCCESS;
-    long long last_send = now_ms();     /* the idle clock starts at JOIN */
+    long long last_send = now_ms(); // the idle clock starts at JOIN
 
     show_prompt = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
     prompt();
 
-    /* Main multiplexing event loop */
+    // Main multiplexing event loop
     while (1) {
         FD_ZERO(&read_fds);
         FD_SET(STDIN_FILENO, &read_fds);
         FD_SET(sockfd, &read_fds);
 
-        /* Idle = no chat message sent for 10 s; messages received do not count.
-         * select() also wakes up to discard an unfinished message. */
+        // Idle = no chat message sent for 10 s; messages received do not count.
+        // select() also wakes up to discard an unfinished message.
         struct timeval tv;
         struct timeval *timeout = NULL;
         long long now = now_ms();
@@ -493,7 +578,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* Incoming message from server */
+        // Incoming message from server
         if (FD_ISSET(sockfd, &read_fds)) {
             if (handle_server_message(sockfd) < 0) {
                 status = EXIT_FAILURE;
@@ -501,8 +586,8 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* User input: read() instead of fgets(), because lines that stdio buffers
-         * are invisible to select() and would wait for the next keystroke */
+        // User input: read() instead of fgets(), because lines that stdio buffers
+        // are invisible to select() and would wait for the next keystroke
         if (FD_ISSET(STDIN_FILENO, &read_fds)) {
             ssize_t n = read(STDIN_FILENO, line_buf + line_len, sizeof(line_buf) - line_len);
             if (n < 0) {
@@ -514,7 +599,7 @@ int main(int argc, char *argv[]) {
                 break;
             }
             if (n == 0) {
-                /* User typed EOF (Ctrl+D): send an unfinished line, then leave */
+                // User typed EOF (Ctrl+D): send an unfinished line, then leave
                 if (line_len > 0 && send_text(sockfd, line_buf, line_len) < 0) {
                     status = EXIT_FAILURE;
                 }
@@ -533,7 +618,7 @@ int main(int argc, char *argv[]) {
                     start = i + 1;
                 }
             }
-            /* A full buffer without '\n' is sent as it is */
+            // A full buffer without '\n' is sent as it is
             if (!failed && start == 0 && line_len == sizeof(line_buf)) {
                 int r = send_text(sockfd, line_buf, line_len);
                 failed = (r < 0);

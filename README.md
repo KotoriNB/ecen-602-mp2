@@ -14,17 +14,17 @@ Feature 1 (ACK, NAK, ONLINE, OFFLINE) and Feature 2 (IDLE).
 ## Build and usage
 
 ```sh
-make                                          # builds ./server and ./client
+make # builds ./server and ./client
 ./server <server_ip> <server_port> <max_clients>
 ./client <username> <server_ip> <server_port>
-make test                                     # automated tests, about 1.5 minutes
-make clean                                    # removes binaries and object files
+make test # automated tests, about 1.5 minutes
+make clean # removes binaries and object files
 ```
 
 ```sh
-./server 127.0.0.1 9000 3                     # IPv4; ::1 for IPv6, :: for both
+./server 127.0.0.1 9000 3 # IPv4; ::1 for IPv6, :: for both
 ./client alice 127.0.0.1 9000
-./client alice ecewkgsw05201.engr.tamu.edu 9000   # the course's reference server
+./client alice ecewkgsw05201.engr.tamu.edu 9000 # the course's reference server
 ```
 
 In the client, type a line and press Enter to send it. Ctrl-D or Ctrl-C
@@ -89,3 +89,14 @@ The design sketch (data model, state machines, decision points) is in
    messages do not reset the clock), and again only after the next SEND.
 7. `max_clients` is 1–1000; idle members count toward it.
 8. End of input (Ctrl-D, or the end of a piped file) leaves the chat.
+9. **Control characters**: the client shows control characters in received
+   text as `^X`, so no message can move the cursor or clear the screen, and
+   drops the escape codes that arrow and other special keys put into a typed
+   line.
+10. **Malformed messages from a server** (a required attribute missing, empty
+    or too long) are discarded by the client, as the handout asks.
+11. **Known limits**: a message that arrives while you are typing redraws the
+    prompt, so the half-typed text disappears from the screen; it is still
+    sent when you press Enter. Connecting to an address that never answers
+    (e.g. the campus server from off campus without VPN) waits for TCP's
+    connect timeout, about 2 minutes; Ctrl-C quits sooner.

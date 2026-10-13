@@ -1,4 +1,4 @@
-// server.c -- SBCP chat server. A single process multiplexes the listening
+// server.c: SBCP chat server. A single process multiplexes the listening
 // socket(s) and every client connection with select(); nothing forks and
 // nothing blocks, so one misbehaving client can never stall or kill the rest.
 //
@@ -20,61 +20,61 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define MAX_CLIENTS_LIMIT   1000            // select() watches at most FD_SETSIZE (1024) descriptors
-#define LISTENQ             128
-#define MAX_LISTEN          8               // one listening socket per resolved address
-#define ACCEPT_BATCH        64              // accepts per wake-up, so clients are not starved
-#define RX_CAP              2048            // largest client message accepted (a SEND is <= 524)
-#define OUTQ_LIMIT          (1024 * 1024)   // backlog at which a non-reading client is dropped
-#define PARTIAL_TIMEOUT_MS  3000            // an incomplete message is discarded after this
-#define LINGER_MS           3000            // a rejected client gets this long to read its NAK
+#define MAX_CLIENTS_LIMIT 1000 // select() watches at most FD_SETSIZE (1024) descriptors
+#define LISTENQ 128
+#define MAX_LISTEN 8 // one listening socket per resolved address
+#define ACCEPT_BATCH 64 // accepts per wake-up, so clients are not starved
+#define RX_CAP 2048 // largest client message accepted (a SEND is at most 524 bytes)
+#define OUTQ_LIMIT (1024 * 1024) // backlog at which a non-reading client is dropped
+#define PARTIAL_TIMEOUT_MS 3000 // an incomplete message is discarded after this
+#define LINGER_MS 3000 // a rejected client gets this long to read its NAK
 
 enum cstate {
-    ST_NEW,         // connected, not joined yet
-    ST_JOINED,      // in the chat (online or idle)
-    ST_REJECTED     // NAK sent; draining until the client closes
+    ST_NEW, // connected, not joined yet
+    ST_JOINED, // in the chat (online or idle)
+    ST_REJECTED // NAK sent; draining until the client closes
 };
 
 // Bytes accepted for sending but not yet taken by the kernel.
 struct outq {
     uint8_t *data;
-    size_t   head, tail, cap;
+    size_t head, tail, cap;
 };
 
 struct client {
-    int                 fd;
-    enum cstate         state;
-    enum sbcp_wire      wire;           // format this peer speaks; we answer in kind
-    int                 wire_known;
-    int                 idle;           // bonus: sent IDLE and no SEND since
-    int                 dead;           // closed at the end of this round by reap()
-    int                 offline_due;    // OFFLINE still to be broadcast for it
-    int                 shut_after_flush;
-    int64_t             linger_until;
-    unsigned long       join_seq;       // order of joining, for the ACK list
-    char                name[MAX_USERNAME_LEN + 1];
-    char                peer[NET_ADDRSTRLEN];
-    struct sbcp_reader  rd;
-    struct outq         out;
+    int fd;
+    enum cstate state;
+    enum sbcp_wire wire; // format this peer speaks; we answer in kind
+    int wire_known;
+    int idle; // bonus: sent IDLE and no SEND since
+    int dead; // closed at the end of this round by reap()
+    int offline_due; // OFFLINE still to be broadcast for it
+    int shut_after_flush;
+    int64_t linger_until;
+    unsigned long join_seq; // order of joining, for the ACK list
+    char name[MAX_USERNAME_LEN + 1];
+    char peer[NET_ADDRSTRLEN];
+    struct sbcp_reader rd;
+    struct outq out;
 };
 
-static struct client *clients[FD_SETSIZE];      // indexed by descriptor
-static int            hi_fd = -1;               // highest descriptor in clients[]
-static int            listen_fds[MAX_LISTEN];
-static int            n_listen;
-static int            max_clients;
-static int            n_joined;                 // live ST_JOINED clients
-static unsigned long  joins_so_far;
-static int            spare_fd = -1;            // given up to shed a connection at EMFILE
-static int64_t        accept_paused_until;
-static int            sig_pipe[2] = { -1, -1 };
+static struct client *clients[FD_SETSIZE]; // indexed by descriptor
+static int hi_fd = -1; // highest descriptor in clients[]
+static int listen_fds[MAX_LISTEN];
+static int n_listen;
+static int max_clients;
+static int n_joined; // live ST_JOINED clients
+static unsigned long joins_so_far;
+static int spare_fd = -1; // given up to shed a connection at EMFILE
+static int64_t accept_paused_until;
+static int sig_pipe[2] = { -1, -1 };
 static volatile sig_atomic_t stop_signal;
 
 // SIGINT/SIGTERM. The byte in sig_pipe wakes select() even if the signal lands
 // between the loop's flag check and the select() call.
 static void on_stop(int signo)
 {
-    int     saved_errno = errno;
+    int saved_errno = errno;
     ssize_t ignored;
 
     stop_signal = signo;
@@ -99,14 +99,13 @@ static void kill_client(struct client *c, const char *why)
     if (c->state == ST_JOINED) {
         n_joined--;
         c->offline_due = 1;
-        log_info("%s (%s) left: %s [%d/%d in chat]", c->name, c->peer, why,
-                 n_joined, max_clients);
+        log_info("%s (%s) left: %s [%d/%d in chat]", c->name, c->peer, why, n_joined, max_clients);
     } else {
         log_info("%s disconnected: %s", c->peer, why);
     }
 }
 
-// ---- Output ---------------------------------------------------------------
+// Output
 
 // 0 on success, -1 if the backlog limit would be passed, -2 if out of memory.
 static int outq_push(struct outq *q, const uint8_t *p, size_t n)
@@ -118,10 +117,10 @@ static int outq_push(struct outq *q, const uint8_t *p, size_t n)
         if (q->head > 0) {
             memmove(q->data, q->data + q->head, q->tail - q->head);
             q->tail -= q->head;
-            q->head  = 0;
+            q->head = 0;
         }
         if (q->tail + n > q->cap) {
-            size_t   cap = q->cap ? q->cap : 4096;
+            size_t cap = q->cap ? q->cap : 4096;
             uint8_t *d;
 
             while (cap < q->tail + n)
@@ -129,7 +128,7 @@ static int outq_push(struct outq *q, const uint8_t *p, size_t n)
             if ((d = realloc(q->data, cap)) == NULL)
                 return -2;
             q->data = d;
-            q->cap  = cap;
+            q->cap = cap;
         }
     }
     memcpy(q->data + q->tail, p, n);
@@ -144,8 +143,7 @@ static void flush(struct client *c)
     struct outq *q = &c->out;
 
     while (q->head < q->tail) {
-        ssize_t k = send(c->fd, q->data + q->head, q->tail - q->head,
-                         NET_SEND_FLAGS);
+        ssize_t k = send(c->fd, q->data + q->head, q->tail - q->head, NET_SEND_FLAGS);
 
         if (k > 0) {
             q->head += (size_t)k;
@@ -153,20 +151,22 @@ static void flush(struct client *c)
         }
         if (k < 0 && errno == EINTR)
             continue;
+        // select() reports when there is room
         if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-            return;                     // select() reports when there is room
+            return;
 
-        // EPIPE / ECONNRESET: the client is gone. MSG_NOSIGNAL and the ignored
+        // EPIPE or ECONNRESET: the client is gone. MSG_NOSIGNAL and the ignored
         // SIGPIPE are why this is an error return and not a dead server.
         kill_client(c, k < 0 ? strerror(errno) : "send() returned 0");
         return;
     }
 
     q->head = q->tail = 0;
-    if (q->cap > 65536) {               // give back what a burst grew
+    // give back what a burst grew
+    if (q->cap > 65536) {
         free(q->data);
         q->data = NULL;
-        q->cap  = 0;
+        q->cap = 0;
     }
 
     // After a NAK: FIN only once the NAK is out, so the client reads it first.
@@ -183,8 +183,7 @@ static void client_send(struct client *c, const uint8_t *msg, size_t len)
     if (c->dead)
         return;
     if (len > 0 && (rc = outq_push(&c->out, msg, len)) < 0) {
-        kill_client(c, rc == -1 ? "not reading: over 1 MiB of output backed up"
-                                : "out of memory for its output");
+        kill_client(c, rc == -1 ? "not reading: over 1 MiB of output backed up" : "out of memory for its output");
         return;
     }
     flush(c);
@@ -192,9 +191,8 @@ static void client_send(struct client *c, const uint8_t *msg, size_t len)
 
 // A server-to-client message with an optional Message and Username
 // attribute, Message first as in the spec's attribute table for FWD.
-static size_t build(uint8_t *buf, size_t cap, enum sbcp_wire wire,
-                    unsigned type, const char *user,
-                    const void *text, size_t textlen)
+static size_t build(uint8_t *buf, size_t cap, enum sbcp_wire wire, unsigned type, const char *user, const void *text,
+    size_t textlen)
 {
     struct sbcp_builder b;
 
@@ -207,13 +205,11 @@ static size_t build(uint8_t *buf, size_t cap, enum sbcp_wire wire,
 }
 
 // Sends to every joined client except `except`; returns how many.
-static int broadcast(const struct client *except, unsigned type,
-                     const char *user, const void *text, size_t textlen)
+static int broadcast(const struct client *except, unsigned type, const char *user, const void *text, size_t textlen)
 {
-    uint8_t buf[4][SBCP_HDR_LEN + 2 * SBCP_ATTR_HDR_LEN +
-                   MAX_MESSAGE_LEN + MAX_USERNAME_LEN];
-    size_t  len[4] = { 0, 0, 0, 0 };    // built lazily, once per format
-    int     fd, count = 0;
+    uint8_t buf[4][SBCP_HDR_LEN + 2 * SBCP_ATTR_HDR_LEN + MAX_MESSAGE_LEN + MAX_USERNAME_LEN];
+    size_t len[4] = { 0, 0, 0, 0 }; // built lazily, once per format
+    int fd, count = 0;
 
     for (fd = 0; fd <= hi_fd; fd++) {
         struct client *c = clients[fd];
@@ -221,8 +217,7 @@ static int broadcast(const struct client *except, unsigned type,
         if (c == NULL || c == except || c->dead || c->state != ST_JOINED)
             continue;
         if (len[c->wire] == 0)
-            len[c->wire] = build(buf[c->wire], sizeof(buf[c->wire]), c->wire,
-                                 type, user, text, textlen);
+            len[c->wire] = build(buf[c->wire], sizeof(buf[c->wire]), c->wire, type, user, text, textlen);
         client_send(c, buf[c->wire], len[c->wire]);
         count++;
     }
@@ -239,7 +234,7 @@ static void flush_offlines(void)
         again = 0;
         for (fd = 0; fd <= hi_fd; fd++) {
             struct client *c = clients[fd];
-            int            n;
+            int n;
 
             if (c == NULL || !c->offline_due)
                 continue;
@@ -274,7 +269,7 @@ static void reap(void)
         hi_fd--;
 }
 
-// ---- Protocol ---------------------------------------------------------------
+// Protocol
 
 static struct client *find_joined(const char *name)
 {
@@ -283,8 +278,7 @@ static struct client *find_joined(const char *name)
     for (fd = 0; fd <= hi_fd; fd++) {
         struct client *c = clients[fd];
 
-        if (c != NULL && !c->dead && c->state == ST_JOINED &&
-            strcmp(c->name, name) == 0)
+        if (c != NULL && !c->dead && c->state == ST_JOINED && strcmp(c->name, name) == 0)
             return c;
     }
     return NULL;
@@ -295,17 +289,17 @@ static struct client *find_joined(const char *name)
 // bytes sat unread would send RST, which can destroy the NAK in flight.
 static void reject(struct client *c, const char *attempted, const char *reason)
 {
-    uint8_t             buf[SBCP_HDR_LEN + SBCP_ATTR_HDR_LEN + MAX_REASON_LEN];
+    uint8_t buf[SBCP_HDR_LEN + SBCP_ATTR_HDR_LEN + MAX_REASON_LEN];
     struct sbcp_builder b;
-    size_t              rlen = strlen(reason);
+    size_t rlen = strlen(reason);
 
     if (rlen > MAX_REASON_LEN)
         rlen = MAX_REASON_LEN;
 
     log_info("%s: JOIN as \"%s\" rejected: %s", c->peer, attempted, reason);
 
-    c->state            = ST_REJECTED;
-    c->linger_until     = now_ms() + LINGER_MS;
+    c->state = ST_REJECTED;
+    c->linger_until = now_ms() + LINGER_MS;
     c->shut_after_flush = 1;
     sbcp_reader_drop(&c->rd);
 
@@ -326,11 +320,11 @@ static int by_join_order(const void *a, const void *b)
 // everyone else, oldest member first.
 static void send_ack(struct client *c)
 {
-    static uint8_t        buf[SBCP_FRAME_MAX];
+    static uint8_t buf[SBCP_FRAME_MAX];
     static struct client *others[FD_SETSIZE];
-    struct sbcp_builder   b;
-    size_t                n = 0, i;
-    int                   fd;
+    struct sbcp_builder b;
+    size_t n = 0, i;
+    int fd;
 
     for (fd = 0; fd <= hi_fd; fd++) {
         struct client *o = clients[fd];
@@ -350,10 +344,10 @@ static void send_ack(struct client *c)
 static void handle_join(struct client *c, const struct sbcp_msg *m)
 {
     struct sbcp_field a;
-    char             name[MAX_USERNAME_LEN + 1];
-    char             shown[64];
-    char             reason[MAX_REASON_LEN + 1];
-    int              len, n;
+    char name[MAX_USERNAME_LEN + 1];
+    char shown[64];
+    char reason[MAX_REASON_LEN + 1];
+    int len, n;
 
     // Only unknown clients may JOIN; a second JOIN is not a rename.
     if (c->state == ST_JOINED) {
@@ -381,8 +375,7 @@ static void handle_join(struct client *c, const struct sbcp_msg *m)
         return;
     }
     if (n_joined >= max_clients) {
-        snprintf(reason, sizeof(reason), "Server full (max %d clients)",
-                 max_clients);
+        snprintf(reason, sizeof(reason), "Server full (max %d clients)", max_clients);
         reject(c, name, reason);
         return;
     }
@@ -390,23 +383,23 @@ static void handle_join(struct client *c, const struct sbcp_msg *m)
         return;
 
     memcpy(c->name, name, (size_t)len + 1);
-    c->state    = ST_JOINED;
-    c->idle     = 0;
+    c->state = ST_JOINED;
+    c->idle = 0;
     c->join_seq = ++joins_so_far;
     n_joined++;
 
     send_ack(c);
     n = broadcast(c, TYPE_ONLINE, c->name, NULL, 0);
-    log_info("%s joined as \"%s\" [%d/%d in chat]: ACK sent, ONLINE -> %d client(s)",
-             c->peer, c->name, n_joined, max_clients, n);
+    log_info("%s joined as \"%s\" [%d/%d in chat]: ACK sent, ONLINE -> %d client(s)", c->peer, c->name, n_joined,
+        max_clients, n);
 }
 
 static void handle_send(struct client *c, const struct sbcp_msg *m)
 {
     struct sbcp_field a;
-    char             shown[256];
-    size_t           len;
-    int              n;
+    char shown[256];
+    size_t len;
+    int n;
 
     if (c->state != ST_JOINED) {
         log_info("%s: SEND before JOIN discarded", c->peer);
@@ -421,8 +414,7 @@ static void handle_send(struct client *c, const struct sbcp_msg *m)
     while (len > 0 && a.val[len - 1] == '\0')
         len--;
     if (len == 0 || len > MAX_MESSAGE_LEN) {
-        log_info("%s: SEND with a %zu-byte message discarded (allowed 1-%d)",
-                 c->name, len, MAX_MESSAGE_LEN);
+        log_info("%s: SEND with a %zu-byte message discarded (allowed 1-%d)", c->name, len, MAX_MESSAGE_LEN);
         return;
     }
 
@@ -435,8 +427,7 @@ static void handle_send(struct client *c, const struct sbcp_msg *m)
     n = broadcast(c, TYPE_FWD, c->name, a.val, len);
 
     sanitize(a.val, len < 80 ? len : 80, shown, sizeof(shown));
-    log_info("SEND %s: \"%s%s\" -> FWD to %d client(s)",
-             c->name, shown, len > 80 ? "..." : "", n);
+    log_info("SEND %s: \"%s%s\" -> FWD to %d client(s)", c->name, shown, len > 80 ? "..." : "", n);
 }
 
 static void handle_idle(struct client *c)
@@ -459,7 +450,7 @@ static void handle_idle(struct client *c)
 static void dispatch(struct client *c, const uint8_t *frame, size_t len)
 {
     struct sbcp_msg m;
-    const char     *why;
+    const char *why;
 
     if (sbcp_parse(frame, len, &m, &why) < 0) {
         log_info("%s: discarded a %zu-byte message: %s", who(c), len, why);
@@ -468,41 +459,39 @@ static void dispatch(struct client *c, const uint8_t *frame, size_t len)
 
     if (!c->wire_known) {
         c->wire_known = 1;
-        c->wire       = m.wire;
+        c->wire = m.wire;
         if (m.wire & SBCP_WIRE_LEGACY)
-            log_info("%s uses the little-endian bit-field layout; answering in kind",
-                     c->peer);
+            log_info("%s uses the little-endian bit-field layout; answering in kind", c->peer);
         if (m.wire & SBCP_WIRE_HDRLEN)
-            log_info("%s counts the 4-byte headers in its Length fields; answering in kind",
-                     c->peer);
+            log_info("%s counts the 4-byte headers in its Length fields; answering in kind", c->peer);
     }
 
     switch (m.type) {
-    case TYPE_JOIN:
-        handle_join(c, &m);
-        break;
-    case TYPE_SEND:
-        handle_send(c, &m);
-        break;
-    case TYPE_IDLE:
-        handle_idle(c);
-        break;
-    default:
-        log_info("%s: discarded a %s message (type %u): not something a client sends",
-                 who(c), sbcp_type_name(m.type), m.type);
-        break;
+        case TYPE_JOIN:
+            handle_join(c, &m);
+            break;
+        case TYPE_SEND:
+            handle_send(c, &m);
+            break;
+        case TYPE_IDLE:
+            handle_idle(c);
+            break;
+        default:
+            log_info("%s: discarded a %s message (type %u): not something a client sends", who(c),
+                sbcp_type_name(m.type), m.type);
+            break;
     }
 }
 
 static void process_frames(struct client *c, int64_t now)
 {
     const uint8_t *frame;
-    const char    *why;
-    size_t         flen;
-    enum sbcp_rd   r;
+    const char *why;
+    size_t flen;
+    enum sbcp_rd r;
 
     while (!c->dead && c->state != ST_REJECTED &&
-           (r = sbcp_reader_next(&c->rd, &frame, &flen, &why, now)) != SBCP_RD_MORE) {
+        (r = sbcp_reader_next(&c->rd, &frame, &flen, &why, now)) != SBCP_RD_MORE) {
         if (r == SBCP_RD_JUNK)
             log_info("%s: %s", who(c), why);
         else
@@ -512,12 +501,13 @@ static void process_frames(struct client *c, int64_t now)
 
 static void on_readable(struct client *c)
 {
-    size_t         room;
-    uint8_t       *p;
-    ssize_t        n;
+    size_t room;
+    uint8_t *p;
+    ssize_t n;
 
     p = sbcp_reader_space(&c->rd, &room);
-    if (room == 0) {                    // cannot happen: a full buffer holds a whole message
+    // cannot happen: a full buffer holds a whole message
+    if (room == 0) {
         sbcp_reader_drop(&c->rd);
         p = sbcp_reader_space(&c->rd, &room);
     }
@@ -530,7 +520,8 @@ static void on_readable(struct client *c)
     if (n < 0) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
             return;
-        kill_client(c, strerror(errno));    // ECONNRESET after an RST, ETIMEDOUT, ...
+        // ECONNRESET after an RST, ETIMEDOUT and the like
+        kill_client(c, strerror(errno));
         return;
     }
 
@@ -542,29 +533,32 @@ static void on_readable(struct client *c)
     process_frames(c, now_ms());
 }
 
-// ---- Connections ------------------------------------------------------------
+// Connections
 
 // A client-side failure seen through accept(): skip it and carry on.
 static int accept_error_is_transient(int e)
 {
     switch (e) {
-    case ECONNABORTED:  // client reset the connection before we accepted it
-    case EPROTO:
-    case EPERM:         // refused by a firewall rule
-    case ENOPROTOOPT:
-    case ENETDOWN:
-    case ENETUNREACH:
-    case EHOSTUNREACH:
-    case EOPNOTSUPP:
+        // client reset the connection before we accepted it
+        case ECONNABORTED:
+        // refused by a firewall rule
+        case EPERM:
+        // network errors on the new connection, which accept(2) says to retry
+        case EPROTO:
+        case ENOPROTOOPT:
+        case ENETDOWN:
+        case ENETUNREACH:
+        case EHOSTUNREACH:
+        case EOPNOTSUPP:
 #ifdef EHOSTDOWN
-    case EHOSTDOWN:
+        case EHOSTDOWN:
 #endif
 #ifdef ENONET
-    case ENONET:
+        case ENONET:
 #endif
-        return 1;
-    default:
-        return 0;
+            return 1;
+        default:
+            return 0;
     }
 }
 
@@ -583,8 +577,9 @@ static void shed_connection(int lfd)
         close(fd);
         log_msg("out of file descriptors: turned one connection away");
     }
+    // no spare: back off instead of spinning
     if ((spare_fd = open("/dev/null", O_RDONLY)) < 0)
-        accept_paused_until = now_ms() + 100;   // no spare: back off instead of spinning
+        accept_paused_until = now_ms() + 100;
 }
 
 static void enable_keepalive(int fd)
@@ -610,7 +605,7 @@ static void accept_clients(int lfd)
 
     for (i = 0; i < ACCEPT_BATCH; i++) {
         struct client *c;
-        int            fd = accept(lfd, NULL, NULL);
+        int fd = accept(lfd, NULL, NULL);
 
         if (fd < 0) {
             if (errno == EINTR || accept_error_is_transient(errno))
@@ -621,14 +616,14 @@ static void accept_clients(int lfd)
                 shed_connection(lfd);
                 return;
             }
-            log_err("accept");          // ENOBUFS, ENOMEM: retry next round
+            // ENOBUFS, ENOMEM: retry next round
+            log_err("accept");
             return;
         }
 
         // select() cannot watch a descriptor this high; FD_SET would corrupt memory.
         if (fd >= FD_SETSIZE) {
-            log_msg("descriptor %d is beyond FD_SETSIZE (%d): connection refused",
-                    fd, FD_SETSIZE);
+            log_msg("descriptor %d is beyond FD_SETSIZE (%d): connection refused", fd, FD_SETSIZE);
             close(fd);
             continue;
         }
@@ -645,9 +640,9 @@ static void accept_clients(int lfd)
             continue;
         }
 
-        c->fd    = fd;
+        c->fd = fd;
         c->state = ST_NEW;
-        c->wire  = SBCP_WIRE_NET;
+        c->wire = SBCP_WIRE_NET;
         net_peer_str(fd, c->peer, sizeof(c->peer));
         enable_keepalive(fd);
 
@@ -664,19 +659,18 @@ static void accept_clients(int lfd)
 static int64_t run_timers(int64_t now)
 {
     int64_t next = -1;
-    int     fd;
+    int fd;
 
     for (fd = 0; fd <= hi_fd; fd++) {
         struct client *c = clients[fd];
-        int64_t        due;
+        int64_t due;
 
         if (c == NULL || c->dead)
             continue;
 
         // A first message that is complete in the header-counting format and
         // nothing more arrived: settle the format and handle it.
-        if (c->state != ST_REJECTED && sbcp_reader_guessing(&c->rd) &&
-            now >= c->rd.last_ms + SBCP_GUESS_MS) {
+        if (c->state != ST_REJECTED && sbcp_reader_guessing(&c->rd) && now >= c->rd.last_ms + SBCP_GUESS_MS) {
             process_frames(c, now);
             if (c->dead)
                 continue;
@@ -695,9 +689,8 @@ static int64_t run_timers(int64_t now)
             if (now >= due) {
                 size_t k = sbcp_reader_drop(&c->rd);
 
-                log_info("%s: discarded an incomplete message (%zu byte%s never "
-                         "arrived within %d s)", who(c), k, k == 1 ? "" : "s",
-                         PARTIAL_TIMEOUT_MS / 1000);
+                log_info("%s: discarded an incomplete message (%zu byte%s never arrived within %d s)", who(c), k,
+                    k == 1 ? "" : "s", PARTIAL_TIMEOUT_MS / 1000);
                 continue;
             }
         } else {
@@ -724,11 +717,11 @@ static void drop_bad_descriptors(void)
 static void serve(void)
 {
     while (!stop_signal) {
-        fd_set          rset, wset;
-        struct timeval  tv, *tvp = NULL;
-        int64_t         now = now_ms();
-        int64_t         wait;
-        int             maxfd, nready, fd, i;
+        fd_set rset, wset;
+        struct timeval tv, *tvp = NULL;
+        int64_t now = now_ms();
+        int64_t wait;
+        int maxfd, nready, fd, i;
 
         wait = run_timers(now);
         reap();
@@ -754,14 +747,15 @@ static void serve(void)
             if (c == NULL)
                 continue;
             FD_SET(fd, &rset);
+            // only while output is backed up
             if (c->out.tail > c->out.head)
-                FD_SET(fd, &wset);      // only while output is backed up
+                FD_SET(fd, &wset);
             if (fd > maxfd)
                 maxfd = fd;
         }
 
         if (wait >= 0) {
-            tv.tv_sec  = (time_t)(wait / 1000);
+            tv.tv_sec = (time_t)(wait / 1000);
             tv.tv_usec = (suseconds_t)(wait % 1000) * 1000;
             tvp = &tv;
         }
@@ -810,8 +804,9 @@ static void close_everything(void)
 
         if (c == NULL)
             continue;
+        // best effort; never blocks
         if (!c->dead)
-            flush(c);                   // best effort; never blocks
+            flush(c);
         close(fd);
         sbcp_reader_free(&c->rd);
         free(c->out.data);
@@ -832,11 +827,11 @@ static void close_everything(void)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "usage: %s <server_ip> <server_port> <max_clients>\n"
-            "  e.g. %s 127.0.0.1 9000 3\n"
-            "       %s ::1 9000 3        IPv6 loopback\n"
-            "       %s :: 9000 3         every interface, IPv4 and IPv6\n",
-            prog, prog, prog, prog);
+        "usage: %s <server_ip> <server_port> <max_clients>\n"
+        "  e.g. %s 127.0.0.1 9000 3\n"
+        "       %s ::1 9000 3        IPv6 loopback\n"
+        "       %s :: 9000 3         every interface, IPv4 and IPv6\n",
+        prog, prog, prog, prog);
     exit(EXIT_FAILURE);
 }
 
@@ -844,15 +839,14 @@ int main(int argc, char **argv)
 {
     char err[256];
     long port, maxc;
-    int  i;
+    int i;
 
     if (argc != 4)
         usage(argv[0]);
     if (parse_long(argv[2], 1, 65535, &port) < 0)
         die_msg("invalid server_port \"%s\": expected an integer in 1-65535", argv[2]);
     if (parse_long(argv[3], 1, MAX_CLIENTS_LIMIT, &maxc) < 0)
-        die_msg("invalid max_clients \"%s\": expected an integer in 1-%d",
-                argv[3], MAX_CLIENTS_LIMIT);
+        die_msg("invalid max_clients \"%s\": expected an integer in 1-%d", argv[3], MAX_CLIENTS_LIMIT);
     max_clients = (int)maxc;
 
     if (pipe(sig_pipe) < 0)
@@ -869,8 +863,7 @@ int main(int argc, char **argv)
     set_signal(SIGINT, on_stop, 0);
     set_signal(SIGTERM, on_stop, 0);
 
-    n_listen = net_listen(argv[1], argv[2], LISTENQ, listen_fds, MAX_LISTEN,
-                          err, sizeof(err));
+    n_listen = net_listen(argv[1], argv[2], LISTENQ, listen_fds, MAX_LISTEN, err, sizeof(err));
     if (n_listen == 0)
         die_msg("cannot listen on %s port %s: %s", argv[1], argv[2], err);
 
@@ -881,8 +874,8 @@ int main(int argc, char **argv)
         if (net_set_nonblock(listen_fds[i], 1) < 0)
             die_sys("fcntl on the listening socket");
         net_sock_str(listen_fds[i], addr, sizeof(addr));
-        log_info("SBCP v%d server listening on %s (max %d clients, pid %ld)",
-                 SBCP_VERSION, addr, max_clients, (long)getpid());
+        log_info("SBCP v%d server listening on %s (max %d clients, pid %ld)", SBCP_VERSION, addr, max_clients,
+            (long)getpid());
     }
 
     spare_fd = open("/dev/null", O_RDONLY);
