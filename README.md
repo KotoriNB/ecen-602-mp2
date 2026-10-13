@@ -7,18 +7,18 @@ Feature 1 (ACK, NAK, ONLINE, OFFLINE) and Feature 2 (IDLE).
 ## Team roles
 
 - **Shih-Yu (Frank) Yang**: client (`src/client.c`), protocol header
-  (`include/sbcp.h`), test report and screen captures.
+  (`include/sbcp.h`), test report, automated tests (`tests/`), Makefile.
 - **Bozhou Chen (Kotori)**: server (`src/server.c`, `src/sbcp_codec.c`,
-  `src/net.c`, `src/util.c`), Makefile, automated tests (`tests/`).
+  `src/net.c`, `src/util.c`), automated tests (`tests/`), screen captures.
 
 ## Build and usage
 
 ```sh
-make # builds ./server and ./client
+make
 ./server <server_ip> <server_port> <max_clients>
 ./client <username> <server_ip> <server_port>
-make test # automated tests, about 1.5 minutes
-make clean # removes binaries and object files
+make test # automated tests
+make clean
 ```
 
 ```sh
