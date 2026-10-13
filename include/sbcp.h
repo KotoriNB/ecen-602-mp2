@@ -40,7 +40,7 @@
  */
 struct sbcp_header {
     uint16_t vrsn_type;  /* 9-bit Version + 7-bit Type (Network Byte Order) */
-    uint16_t length;     /* Total message length in bytes including header */
+    uint16_t length;     /* Bytes after this header (the attributes), Network Byte Order */
 } __attribute__((packed));
 
 /*
@@ -55,7 +55,7 @@ struct sbcp_header {
  */
 struct sbcp_attr {
     uint16_t type;       /* Attribute type (Network Byte Order) */
-    uint16_t length;     /* Total attribute length in bytes including header */
+    uint16_t length;     /* Payload bytes, header not counted (Network Byte Order) */
     char payload[];      /* Flexible array member pointing to payload data */
 } __attribute__((packed));
 

@@ -112,7 +112,8 @@ Server:
 
 ```
 loop until SIGINT/SIGTERM:
-    run_timers()        drop messages unfinished after 3 s; close NAKed clients after 3 s
+    run_timers()        drop messages unfinished after 3 s; close NAKed clients after 3 s;
+                        settle a first message's Length format after 250 ms of quiet
     reap()              OFFLINE for leavers, close and free dead clients
     rset = sig_pipe + listening sockets + every client; wset = clients with queued output
     select(rset, wset, timeout = nearest timer)
@@ -147,7 +148,7 @@ loop:
 | D2 | Framing | buffer driven by the Length field, in both programs | "one `read()` = one message" loses messages when TCP splits or merges them |
 | D3 | Bad input | discard, keep the connection | closing on the first bad byte makes one typo fatal; the handout says discard |
 | D4 | Bad header | drop everything buffered | with the Length unreadable there is no next boundary to find |
-| D5 | Oversized message | skip exactly Length bytes | keeps the next message; dropping the connection would punish a peer for one message |
+| D5 | Oversized message | skip exactly its bytes (Length + 4) | keeps the next message; dropping the connection would punish a peer for one message |
 | D6 | Writes | non-blocking + per-client queue, 1 MiB cap | a blocking `send()` to a client that stopped reading freezes every client |
 | D7 | Disconnect during a broadcast | mark dead, reap at the end of the round | freeing inside the loop that is iterating the table is a use-after-free |
 | D8 | SIGPIPE | `SIG_IGN` + `MSG_NOSIGNAL` | default action kills the server on the first write to a reset client |

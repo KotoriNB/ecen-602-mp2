@@ -1489,7 +1489,7 @@ static void t_a5_ack_nak_online_offline(void)
     p5 = peer_connect(s->probe, s->port);
     CHECK(p5 && join_reply(p5, "p1", -1, &f) == 1 && f.ok && f.m.type == TYPE_NAK &&
           fr_attr(&f, ATTR_REASON, reason, sizeof(reason)) > 0 &&
-          strcmp(reason, "Username already in use") == 0, "duplicate got no NAK");
+          strcmp(reason, "Username already exists") == 0, "duplicate got no NAK");
 
     peer_free(p2);
     CHECK(expect_msg(p1, TYPE_OFFLINE, "p2", NULL, T(2000)) &&
@@ -1596,7 +1596,7 @@ static void t_b1_golden_bytes(void)
     pc = peer_connect(s->probe, s->port);
     CHECK(pc && peer_write(pc, "\x01\x82\x00\x09\x00\x02\x00\x05" "alice", 13) == 0, "dup JOIN");
     CHECK(peer_recv(pc, &f, T(2000)) == 1 &&
-          GOLDEN(&f, "\x01\x85\x00\x1b\x00\x01\x00\x17" "Username already in use"), "NAK");
+          GOLDEN(&f, "\x01\x85\x00\x1b\x00\x01\x00\x17" "Username already exists"), "NAK");
 
     peer_free(pb);
     CHECK(peer_recv(pa, &f, T(2000)) == 1 &&
@@ -1919,6 +1919,42 @@ static void t_b12_header_counting_client(void)
     CHECK(expect_msg(pt, TYPE_ACK, NULL, NULL, T(2000)), "header-counting JOIN byte by byte");
     CHECK(wait_for(pa, TYPE_ONLINE, "slower", NULL, T(2000)), "ONLINE slower");
     CHECK(log_has(s, "counts the 4-byte headers"), "format not logged");
+}
+
+// The session from the campus server's log (ecewkgsw05201, Oct 12): our
+// replies are byte for byte what the campus server sent.
+static void t_b13_campus_bytes(void)
+{
+    static struct frame f;
+    struct srv         *s = srv_start("127.0.0.1", 5);
+    struct peer        *pa, *pb, *pc;
+
+    CHECK(s != NULL, "server did not start");
+    pa = peer_connect(s->probe, s->port);
+    CHECK(pa && peer_write(pa, "\x01\x82\x00\x0c\x00\x02\x00\x08" "kotori_a", 16) == 0 &&
+          peer_recv(pa, &f, T(2000)) == 1 && GOLDEN(&f, "\x01\x87\x00\x06\x00\x03\x00\x02\x00\x01"),
+          "ACK for kotori_a");
+    pb = peer_connect(s->probe, s->port);
+    CHECK(pb && peer_write(pb, "\x01\x82\x00\x0c\x00\x02\x00\x08" "kotori_b", 16) == 0 &&
+          peer_recv(pb, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x87\x00\x12\x00\x03\x00\x02\x00\x02\x00\x02\x00\x08" "kotori_a"),
+          "ACK for kotori_b");
+    CHECK(peer_recv(pa, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x88\x00\x0c\x00\x02\x00\x08" "kotori_b"), "ONLINE kotori_b");
+    CHECK(peer_write(pb, "\x01\x84\x00\x09\x00\x04\x00\x05" "hewwo", 13) == 0 &&
+          peer_recv(pa, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x83\x00\x15\x00\x04\x00\x05" "hewwo" "\x00\x02\x00\x08" "kotori_b"),
+          "FWD hewwo");
+    CHECK(peer_write(pb, "\x01\x89\x00\x00", 4) == 0 && peer_recv(pa, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x89\x00\x0c\x00\x02\x00\x08" "kotori_b"), "IDLE kotori_b");
+    pc = peer_connect(s->probe, s->port);
+    CHECK(pc && peer_write(pc, "\x01\x82\x00\x0c\x00\x02\x00\x08" "kotori_a", 16) == 0 &&
+          peer_recv(pc, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x85\x00\x1b\x00\x01\x00\x17" "Username already exists"),
+          "NAK for a second kotori_a");
+    peer_free(pb);
+    CHECK(peer_recv(pa, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x86\x00\x0c\x00\x02\x00\x08" "kotori_b"), "OFFLINE kotori_b");
 }
 
 // ============================================================================
@@ -2749,7 +2785,7 @@ static void t_i5_duplicate_name(void)
     a = join_as(s, "alice");
     CHECK(a != NULL, "setup");
     c = cli_start("alice", "127.0.0.1", s->port, NULL);
-    CHECK(c && cli_expect(c, "Username already in use", T(3000)), "NAK reason not shown");
+    CHECK(c && cli_expect(c, "Username already exists", T(3000)), "NAK reason not shown");
     CHECK(cli_wait(c, T(3000)), "client kept running after the NAK");
     note("%s", signal_note(c));
 }
@@ -3386,6 +3422,39 @@ static void t_i34_no_echo_from_server(void)
     CHECK(!cli_ever(c, "frank: hello all"), "own message shown back as if someone else sent it");
 }
 
+// The campus server's replies from its log, byte for byte: shown correctly.
+static void t_i35_campus_replies(void)
+{
+    static struct frame f;
+    struct peer        *conn;
+    struct cli         *c;
+
+    conn = fake_join(&c, "kotori_b");
+    CHECK(conn != NULL, "client did not connect and JOIN");
+    CHECK(GOLDEN(&join_frame, "\x01\x82\x00\x0c\x00\x02\x00\x08" "kotori_b"),
+          "JOIN differs from the campus log");
+    CHECK(peer_write(conn, "\x01\x87\x00\x12\x00\x03\x00\x02\x00\x02\x00\x02\x00\x08" "kotori_a",
+                     22) == 0 && cli_expect(c, "Client count: 2", T(2000)) &&
+          cli_expect(c, "Active users: kotori_a", T(1000)), "campus ACK not shown");
+    CHECK(cli_say(c, "hewwo") == 0 && peer_recv(conn, &f, T(2000)) == 1 &&
+          GOLDEN(&f, "\x01\x84\x00\x09\x00\x04\x00\x05" "hewwo"), "SEND differs from the campus log");
+    CHECK(peer_write(conn, "\x01\x83\x00\x17\x00\x04\x00\x07" "heelllo" "\x00\x02\x00\x08" "kotori_a",
+                     27) == 0 && cli_expect(c, "kotori_a: heelllo", T(2000)), "campus FWD not shown");
+    CHECK(peer_write(conn, "\x01\x88\x00\x0c\x00\x02\x00\x08" "kotori_c", 16) == 0 &&
+          cli_expect(c, "<kotori_c> is online", T(2000)), "campus ONLINE not shown");
+    CHECK(peer_write(conn, "\x01\x89\x00\x0c\x00\x02\x00\x08" "kotori_a", 16) == 0 &&
+          cli_expect(c, "kotori_a is idle", T(2000)), "campus IDLE not shown");
+    CHECK(peer_write(conn, "\x01\x86\x00\x0c\x00\x02\x00\x08" "kotori_c", 16) == 0 &&
+          cli_expect(c, "<kotori_c> is offline", T(2000)), "campus OFFLINE not shown");
+
+    conn = fake_join(&c, "caleb");
+    CHECK(conn != NULL, "client did not connect and JOIN");
+    CHECK(peer_write(conn, "\x01\x85\x00\x1b\x00\x01\x00\x17" "Username already exists", 31) == 0 &&
+          cli_expect(c, "Username already exists", T(2000)), "campus NAK not shown");
+    CHECK(cli_wait(c, T(3000)) && WIFEXITED(c->status) && WEXITSTATUS(c->status) == 1,
+          "client did not exit with status 1 after the NAK (%s)", signal_note(c));
+}
+
 // ============================================================================
 // runner
 // ============================================================================
@@ -3418,6 +3487,7 @@ static const struct test TESTS[] = {
     { "B10", "300 messages arrive in order",                            t_b10_order, 0 },
     { "B11", "ACK lists members in join order",                         t_b11_ack_join_order, 0 },
     { "B12", "client counting headers in Length: answered in kind",     t_b12_header_counting_client, 0 },
+    { "B13", "replies byte-identical to the campus server's log",       t_b13_campus_bytes, 0 },
     { "C1",  "text/HTTP/binary garbage discarded",                      t_c1_garbage, 0 },
     { "C2",  "unknown message types discarded, framing kept",           t_c2_unknown_type, 0 },
     { "C3",  "server-only message types from a client discarded",       t_c3_server_only_types, 0 },
@@ -3475,6 +3545,7 @@ static const struct test TESTS[] = {
     { "I32", "client: Ctrl-C (SIGINT) gives OFFLINE",                       t_i32_ctrl_c, 0 },
     { "I33", "client: prompt shown on a terminal",                          t_i33_prompt_on_terminal, 0 },
     { "I34", "client: own messages not shown back",                         t_i34_no_echo_from_server, 0 },
+    { "I35", "client: the campus server's exact replies shown",             t_i35_campus_replies, 0 },
 };
 
 static void kill_children(void)

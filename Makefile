@@ -1,7 +1,7 @@
 # Makefile -- ECEN 602 MP2: SBCP chat server and client
 #
 #   make              build server and client
-#   make test         all tests: 43 server cases + 34 client cases (about 1.5 minutes)
+#   make test         all tests: 44 server cases + 35 client cases (about 1.5 minutes)
 #   make test-server  the server cases only (about 25 s)
 #   make test-client  the client cases only (about 75 s)
 #   make test-quick   all tests except the slow timing cases (about 30 s)

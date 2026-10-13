@@ -118,6 +118,22 @@ static int pack_idle(uint8_t *buf, size_t buf_size) {
     return (int)total_len;
 }
 
+/* send() until every byte is out; returns 0, or -1 with errno set */
+static int send_all(int sockfd, const uint8_t *buf, size_t len) {
+    while (len > 0) {
+        ssize_t n = send(sockfd, buf, len, 0);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        buf += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
 /* Send one typed line as SEND messages of at most MAX_MESSAGE_LEN bytes each.
  * Returns 1 if something was sent, 0 for an empty line, -1 on error. */
 static int send_text(int sockfd, const char *text, size_t len) {
@@ -139,7 +155,7 @@ static int send_text(int sockfd, const char *text, size_t len) {
         }
 
         int send_len = pack_send(text, chunk, send_buf, sizeof(send_buf));
-        if (send_len < 0 || send(sockfd, send_buf, send_len, 0) < 0) {
+        if (send_len < 0 || send_all(sockfd, send_buf, (size_t)send_len) < 0) {
             perror("send failed");
             return -1;
         }
@@ -399,7 +415,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    if (send(sockfd, send_buf, join_len, 0) < 0) {
+    if (send_all(sockfd, send_buf, (size_t)join_len) < 0) {
         perror("Failed to send JOIN message");
         close(sockfd);
         exit(EXIT_FAILURE);
@@ -465,7 +481,7 @@ int main(int argc, char *argv[]) {
 
         if (!is_idle && now_ms() - last_send >= IDLE_TIMEOUT_SEC * 1000LL) {
             int idle_len = pack_idle(send_buf, sizeof(send_buf));
-            if (idle_len > 0 && send(sockfd, send_buf, idle_len, 0) < 0) {
+            if (idle_len > 0 && send_all(sockfd, send_buf, (size_t)idle_len) < 0) {
                 perror("send failed");
                 status = EXIT_FAILURE;
                 break;

@@ -377,7 +377,7 @@ static void handle_join(struct client *c, const struct sbcp_msg *m)
     flush_offlines();
 
     if (find_joined(name) != NULL) {
-        reject(c, name, "Username already in use");
+        reject(c, name, "Username already exists");
         return;
     }
     if (n_joined >= max_clients) {
